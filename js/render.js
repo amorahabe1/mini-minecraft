@@ -105,8 +105,9 @@ export class Sky {
       vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); vec4 p = projectionMatrix * modelViewMatrix * vec4(position,1.0); gl_Position = p.xyww; }`,
       fragmentShader: `uniform vec3 uTop; uniform vec3 uHorizon; uniform vec3 uSunDir; uniform vec4 uSunrise; uniform vec3 uVoid; varying vec3 vDir;
         void main(){ vec3 d = normalize(vDir); float e = d.y;
-          vec3 c = mix(uHorizon, uTop, smoothstep(-0.02, 0.35, e));
-          if (e < -0.02) c = mix(uHorizon, uHorizon * 0.6, smoothstep(-0.02, -0.6, e));
+          vec3 c = mix(uHorizon, uTop, smoothstep(0.0, 0.4, e));
+          // 地平线附近保持与雾相同的颜色，避免一条黑带；只在极低处略微变暗
+          if (e < 0.0) c = mix(uHorizon, uHorizon * 0.7, smoothstep(-0.2, -0.95, e));
           vec2 sd = normalize(uSunDir.xz + vec2(1e-4));
           float toward = max(0.0, dot(normalize(d.xz + vec2(1e-4)), sd));
           float glow = uSunrise.w * pow(toward, 3.0) * (1.0 - smoothstep(0.0, 0.5, abs(e - 0.05)));

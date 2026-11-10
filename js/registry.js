@@ -188,6 +188,7 @@ defItem(276, 'bucket', '桶', { maxStack: 16, tab: 'tools', bucket: 'empty' });
 defItem(277, 'water_bucket', '水桶', { maxStack: 1, tab: 'tools', bucket: 'water' });
 defItem(278, 'lava_bucket', '岩浆桶', { maxStack: 1, tab: 'tools', bucket: 'lava', fuel: 20000 });
 defItem(279, 'bread', '面包', { food: [5, 6], tab: 'food' });
+defItem(280, 'compass', '指南针', { tab: null });
 
 export const MATERIALS = [
   { key: 'wooden', name: '木', speed: 2, tier: 0, durability: 59, fuel: 200, dmg: { sword: 4, axe: 7, pickaxe: 2, shovel: 2.5 }, axeSpeed: 0.8 },

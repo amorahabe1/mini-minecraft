@@ -279,7 +279,12 @@ class Game {
     this.hideClickHint();
     this.saveWorld();
   }
-  onScreenClosed() { this.lock(); this.hideClickHint(); }
+  onScreenClosed() {
+    this.hideClickHint();
+    setTimeout(() => {
+      if (this.inWorld && !this.paused && !this.ui.isOpen() && !this.ui.chatOpen && !this.player.dead) this.lock();
+    }, 40);
+  }
   get locked() { return document.pointerLockElement === this.canvas; }
 
   // ---------------- 输入 ----------------
@@ -287,6 +292,10 @@ class Game {
     document.addEventListener('pointerlockchange', () => {
       if (this.locked) { this.hideClickHint(); return; }
       this.keys.clear(); this.mouse.left = this.mouse.right = false;
+      if (this.ui.chatOpen) {
+        const inp = document.getElementById('chatInput');
+        if (inp) setTimeout(() => inp.focus(), 0);
+      }
       if (this.expectUnlock) { this.expectUnlock = false; return; }
       // 用户按 Esc 解除锁定
       if (this.inWorld && !this.loading && !this.paused && !this.ui.isOpen() && !this.ui.chatOpen && !this.player.dead) this.pause();
@@ -328,17 +337,27 @@ class Game {
   }
   onKeyDown(e) {
     if (!this.inWorld || this.loading) return;
-    if (e.target && e.target.tagName === 'INPUT') return;
+    const isInput = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
+    if (isInput && e.code !== 'Escape') return;
     const code = e.code;
     const inGame = this.locked && !this.paused;
     if (['F1', 'F3', 'F5', 'Tab', 'Space'].includes(code) || (inGame && (e.ctrlKey || e.altKey))) e.preventDefault();
     if (this.ui.isOpen()) {
-      if (this.ui.screenKey(e)) { e.preventDefault(); return; }
+      if (!isInput && this.ui.screenKey(e)) { e.preventDefault(); return; }
       if (code === 'KeyE' || code === 'Escape') { e.preventDefault(); this.ui.close(); }
       return;
     }
+    if (this.ui.chatOpen) {
+      if (code === 'Escape') { e.preventDefault(); this.ui.closeChat(); this.resume(); }
+      return;
+    }
     if (this.player.dead || this.paused) return;
-    if (!this.locked) { if (code === 'Escape') this.pause(); return; }
+    if (!this.locked) {
+      if (code === 'Escape') this.pause();
+      else if (code === 'KeyE') this.ui.open('inventory');
+      else if (code === 'KeyT' || code === 'Slash' || code === 'Enter') { e.preventDefault(); this.ui.openChat(code === 'Slash' ? '/' : ''); }
+      return;
+    }
     const now = performance.now();
     if (!e.repeat) {
       if (code === 'KeyW') { if (now - (this.lastW || 0) < 350) this.sprintTap = true; this.lastW = now; }
@@ -353,7 +372,7 @@ class Game {
     else if (code === 'KeyQ') this.dropHeld(e.ctrlKey);
     else if (code === 'KeyT' || code === 'Slash' || code === 'Enter') { e.preventDefault(); this.unlock(); this.ui.openChat(code === 'Slash' ? '/' : ''); }
     else if (code === 'F1') { this.hudHidden = !this.hudHidden; this.ui.setHudVisible(!this.hudHidden); }
-    else if (code === 'F3') { this.showDebug = !this.showDebug; document.getElementById('debug').classList.toggle('hidden', !this.showDebug); document.getElementById('debugR').classList.toggle('hidden', !this.showDebug); }
+    else if (code === 'F3') { this.showDebug = !this.showDebug; this.ui.syncChrome(); }
     else if (code === 'F5') this.perspective = (this.perspective + 1) % 3;
   }
   input() {
@@ -1006,7 +1025,7 @@ class Game {
     const m = this.materials;
     m.setAll('uFogColor', fogColor); m.setAll('uFogNear', near); m.setAll('uFogFar', far);
     m.setAll('uDarken', this.darken); m.setAll('uTime', this.time / 20);
-    r.setClearColor(fogColor.clone().convertSRGBToLinear());
+    r.setClearColor(fogColor, 1);
     // 选择框
     const t = this.target;
     if (t && !t.entity && !p.dead) this.highlight.show(t.x, t.y, t.z, t.id); else this.highlight.hide();
@@ -1017,7 +1036,7 @@ class Game {
     r.render(this.skyScene, cam);
     r.render(this.scene, cam);
     // 第一人称手
-    if (this.perspective === 0 && !this.hudHidden && !p.dead) {
+    if (this.perspective === 0 && !this.hudHidden && !p.dead && !this.ui.hideHand) {
       const h = p.inventory.held();
       this.hand.setItem(h ? h.id : 0);
       const swing = p.swinging ? Math.min(1, (Math.max(0, p.swingTicks) + alpha) / 6) : 0;
@@ -1046,7 +1065,11 @@ class Game {
     const loaded = [...w.chunks.values()].filter((c) => c.blocks).length;
     const meshed = [...w.chunks.values()].filter((c) => c.solid || c.trans).length;
     const info = this.renderer.info;
-    document.getElementById('debug').textContent = [
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const paint = (id, lines) => {
+      document.getElementById(id).innerHTML = lines.map((l) => (l ? `<span>${esc(l)}</span>` : '<br>')).join('\n');
+    };
+    paint('debug', [
       `Mini Minecraft 网页复刻版 (${this.fps} fps)`,
       `区块：已加载 ${loaded}，已渲染 ${meshed}，渲染距离 ${this.settings.renderDistance}`,
       `实体：${this.entities.length}`,
@@ -1060,8 +1083,8 @@ class Game {
       `时间: 第 ${Math.floor(this.time / 24000)} 天 ${Math.floor(this.time % 24000)}`,
       `种子: ${this.meta.seed}`,
       `模式: ${p.mode === 'creative' ? '创造' : '生存'}${p.flying ? '（飞行）' : ''}${p.sprinting ? ' 疾跑' : ''}${p.sneaking ? ' 潜行' : ''}`,
-    ].join('\n');
-    document.getElementById('debugR').textContent = [
+    ]);
+    paint('debugR', [
       `WebGL2 · Three.js r${THREE.REVISION}`,
       `${window.innerWidth}x${window.innerHeight}`,
       `绘制调用: ${info.render.calls}`,
@@ -1070,7 +1093,7 @@ class Game {
       '',
       t && !t.entity ? `目标方块: ${t.x}, ${t.y}, ${t.z}` : '',
       t && !t.entity ? `${BLOCKS[t.id].key}（${BLOCKS[t.id].name}）` : t && t.entity ? `目标实体: ${t.entity.def.name}` : '',
-    ].join('\n');
+    ]);
   }
   playerPreviewCanvas() { return previewCanvas(); }
 }

@@ -108,7 +108,7 @@
 
 ## 🛠️ 技术实现
 
-- **无构建步骤**：纯静态文件，`index.html` 通过 import map 从 jsDelivr 加载 Three.js r164，可直接部署到 GitHub Pages
+- **无构建步骤**：纯静态文件，`index.html` 通过 import map 加载仓库内的 Three.js r164（`vendor/three.module.js`），可直接部署到 GitHub Pages
 - `js/worldgen.js`：Simplex 噪声地形、生物群系、洞穴、矿石、树木（Worker 中运行）
 - `js/mesher.js`：区块网格化（面剔除、AO、平滑光照、BFS 光照传播、液体高度、交叉模型、火把）（Worker 中运行）
 - `js/world.js`：区块加载/卸载与优先级调度、方块读写、方块更新（液体、重力、支撑）、随机刻

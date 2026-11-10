@@ -428,6 +428,19 @@ const ITEM_DRAW = {
   bucket: (t) => bucket(t, null),
   water_bucket: (t) => bucket(t, hex(0x2f5fd0)),
   lava_bucket: (t) => bucket(t, hex(0xff8a1c)),
+  compass: (t) => {
+    t.clear();
+    const ring = hex(0x4a4a52), face = hex(0xd8d4c8), dark = hex(0x2a2a30), red = hex(0xc4281c), needle = hex(0xe8e8e8);
+    for (let y = 2; y < 14; y++) for (let x = 2; x < 14; x++) {
+      const dx = x + 0.5 - 8, dy = y + 0.5 - 8, d = dx * dx + dy * dy;
+      if (d <= 6.8 * 6.8) t.set(x, y, d >= 5.6 * 5.6 ? ring : face);
+    }
+    t.set(8, 3, dark); t.set(8, 12, dark); t.set(3, 8, dark); t.set(12, 8, dark);
+    t.set(8, 5, red); t.set(8, 6, red); t.set(7, 6, red); t.set(8, 7, red);
+    t.set(8, 9, needle); t.set(8, 10, needle); t.set(9, 9, needle);
+    t.set(8, 8, hex(0x3a3a3a));
+    t.outline(hex(0x1a1a1a));
+  },
 };
 function bucket(t, fill) {
   t.clear();

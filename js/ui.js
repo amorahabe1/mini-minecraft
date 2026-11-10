@@ -113,7 +113,6 @@ export class UI {
       else $('#itemName').style.opacity = 0;
     }
     const survival = p.mode === 'survival';
-    $('#stats').classList.toggle('hidden', !survival);
     if (survival) {
       const hk = Math.ceil(p.health) + ':' + p.food + ':' + Math.ceil(p.airSupply / 30) + ':' + (p.hurtTime > 0);
       if (hk !== this.lastHud.stats) {
@@ -139,8 +138,34 @@ export class UI {
     const ai = $('#attackInd');
     const cd = p.attackCooldownProgress ? p.attackCooldownProgress() : 1;
     if (cd < 1 && survival) { ai.classList.remove('hidden'); ai.firstChild.style.width = Math.round(cd * 100) + '%'; } else ai.classList.add('hidden');
+    this.syncChrome();
   }
-  setHudVisible(v) { this.hud.style.display = v ? '' : 'none'; }
+  /** 按当前界面状态显示/隐藏准星、快捷栏、聊天等，避免叠在菜单或物品栏上。 */
+  syncChrome() {
+    const g = this.game;
+    const menu = document.getElementById('menu');
+    const menuOpen = !!(menu && !menu.classList.contains('hidden'));
+    const death = !!document.querySelector('.death');
+    const screenOpen = this.isOpen();
+    const inWorld = !!(g.inWorld && !g.loading);
+    const f1 = !!g.hudHidden;
+    const hideShell = !inWorld || f1;
+    const hidePlay = hideShell || death || screenOpen;
+    const hideCenter = hidePlay || menuOpen;
+    this.hud.style.display = hideShell ? 'none' : '';
+    const setH = (id, hid) => { const e = document.getElementById(id); if (e) e.classList.toggle('hidden', hid); };
+    setH('crosshair', hideCenter);
+    setH('itemName', hideCenter);
+    setH('chat', hideCenter);
+    setH('hotbar', hidePlay);
+    setH('stats', hidePlay || (g.player && g.player.mode !== 'survival'));
+    setH('debug', hidePlay || !g.showDebug);
+    setH('debugR', hidePlay || !g.showDebug);
+    if (hideCenter) setH('attackInd', true);
+    if (menu) menu.classList.toggle('in-game', menuOpen && inWorld && menu.classList.contains('dim'));
+    this.hideHand = hideCenter;
+  }
+  setHudVisible(v) { this.hud.style.display = v ? '' : 'none'; this.syncChrome(); }
 
   // ---------------- 聊天 ----------------
   addMessage(text) {
@@ -157,8 +182,10 @@ export class UI {
       if (e.key === 'Enter') { const v = inp.value.trim(); this.closeChat(); if (v) this.game.chat(v); this.game.resume(); }
       else if (e.key === 'Escape') { this.closeChat(); this.game.resume(); }
     });
-    setTimeout(() => inp.focus(), 0);
     this.chatOpen = true;
+    const focusChat = () => { if (this.chatOpen && document.getElementById('chatInput') === inp) inp.focus(); };
+    setTimeout(focusChat, 0);
+    setTimeout(focusChat, 80);
   }
   closeChat() { const i = $('#chatInput'); if (i) i.remove(); this.chatOpen = false; }
 
@@ -166,6 +193,8 @@ export class UI {
   isOpen() { return !!this.screen; }
   open(type, data) {
     this.close(true);
+    this.hover = null;
+    this.tooltip.classList.add('hidden');
     this.screen = { type, data, bindings: [] };
     const root = el('div', '', document.body); root.id = 'screen';
     this.screen.root = root;
@@ -179,6 +208,7 @@ export class UI {
     root.addEventListener('contextmenu', (e) => e.preventDefault());
     root.addEventListener('wheel', (e) => { if (this.screen && this.screen.type === 'creative') { this.scrollCreative(e.deltaY > 0 ? 1 : -1); } });
     this.refresh();
+    this.syncChrome();
   }
   close(silent) {
     if (!this.screen) return;
@@ -191,9 +221,11 @@ export class UI {
     if (this.cursor) { const left = inv.add(this.cursor); if (left) g.dropStack({ ...this.cursor, count: left }); this.cursor = null; }
     this.screen.root.remove();
     this.screen = null;
+    this.hover = null;
     this.tooltip.classList.add('hidden');
     this.cursorEl.innerHTML = '';
     if (!silent) g.onScreenClosed();
+    this.syncChrome();
   }
   panel(root, w, h) { const p = el('div', 'panel', root); p.style.width = px(w + 4); p.style.height = px(h + 4); return p; }
   label(p, text, x, y) { const l = el('div', 'lbl', p); l.textContent = text; l.style.left = px(x); l.style.top = px(y); return l; }
@@ -281,7 +313,7 @@ export class UI {
       tb.addEventListener('mousedown', (e) => { e.stopPropagation(); this.creativeTab = t.key; this.creativeScroll = 0; this.open('creative'); });
     }
     const tab = CREATIVE_TABS.find((t) => t.key === this.creativeTab);
-    this.label(p, tab.name, 8, 6);
+    this.label(p, this.creativeTab === 'inventory' ? '物品栏' : tab.name, 8, 6);
     if (this.creativeTab === 'inventory') {
       const prev = el('div', 'preview', p); prev.style.left = px(73); prev.style.top = px(5); prev.style.width = px(32); prev.style.height = px(43);
       prev.appendChild(this.game.playerPreviewCanvas());
@@ -292,7 +324,10 @@ export class UI {
         const s = el('input', 'search', p); s.style.left = px(82); s.style.top = px(4); s.style.width = px(89); s.style.height = px(12);
         s.value = this.creativeSearch; s.placeholder = '搜索...';
         s.addEventListener('input', () => { this.creativeSearch = s.value; this.creativeScroll = 0; this.fillCreative(); });
-        s.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') { s.blur(); } });
+        s.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.close(); return; }
+          e.stopPropagation();
+        });
         s.addEventListener('mousedown', (e) => e.stopPropagation());
         setTimeout(() => s.focus(), 0);
       }
@@ -326,7 +361,11 @@ export class UI {
     const maxScroll = Math.max(0, rows - 5);
     this.creativeScroll = Math.max(0, Math.min(maxScroll, this.creativeScroll));
     this.screen.cgrid.forEach((b, i) => { b.item = items[this.creativeScroll * 9 + i] || 0; });
-    if (this.screen.knob) this.screen.knob.style.top = px(maxScroll ? (this.creativeScroll / maxScroll) * 73 : 0);
+    if (this.screen.knob) {
+      const sc = this.screen.knob.parentElement;
+      sc.style.display = maxScroll ? '' : 'none';
+      this.screen.knob.style.top = px(maxScroll ? (this.creativeScroll / maxScroll) * 73 : 0);
+    }
     this.refresh();
   }
   scrollCreative(d) { if (!this.screen.cgrid) return; this.creativeScroll += d; this.fillCreative(); }
@@ -360,7 +399,16 @@ export class UI {
     this.tooltip.classList.remove('hidden');
     this.placeTooltip();
   }
-  placeTooltip() { this.tooltip.style.left = (this.mx + 14) + 'px'; this.tooltip.style.top = (this.my - 20) + 'px'; }
+  placeTooltip() {
+    const tip = this.tooltip;
+    let x = (this.mx || 0) + 14, y = (this.my || 0) - 20;
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    if (x + w > window.innerWidth - 4) x = (this.mx || 0) - w - 8;
+    if (y + h > window.innerHeight - 4) y = window.innerHeight - h - 4;
+    if (x < 4) x = 4;
+    if (y < 4) y = 4;
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  }
 
   // ---------- 点击逻辑 ----------
   onSlotDown(b, e) {
@@ -392,7 +440,9 @@ export class UI {
     this.lastClick = { t: now, slot: b };
     if (shift) { this.quickMove(b); this.refresh(); return; }
     if (this.cursor && !b.result && !b.output) {
+      this.click(b, button);
       this.drag = { button, slots: [b] };
+      this.refresh();
       return;
     }
     this.click(b, button);
@@ -412,7 +462,7 @@ export class UI {
     if (!this.drag) return;
     const d = this.drag; this.drag = null;
     for (const b of d.slots) b.el.style.outline = '';
-    if (d.slots.length <= 1) { this.click(d.slots[0], d.button); this.refresh(); return; }
+    if (d.slots.length <= 1) { this.refresh(); return; }
     const c = this.cursor; if (!c) return;
     const per = d.button === 1 ? 1 : Math.floor(c.count / d.slots.length);
     if (per < 1) { this.refresh(); return; }
@@ -543,9 +593,10 @@ export class UI {
     m.className = cls; m.innerHTML = '';
     m.classList.remove('hidden');
     if (cls === 'dirt' && this.dirtURL) { m.style.backgroundImage = `linear-gradient(rgba(0,0,0,.72),rgba(0,0,0,.72)), url(${this.dirtURL})`; } else m.style.backgroundImage = '';
+    this.syncChrome();
     return m;
   }
-  hideMenu() { const m = $('#menu'); if (m) { m.classList.add('hidden'); m.innerHTML = ''; } const d = $('.death'); if (d) d.remove(); }
+  hideMenu() { const m = $('#menu'); if (m) { m.classList.add('hidden'); m.classList.remove('in-game'); m.innerHTML = ''; } const d = $('.death'); if (d) d.remove(); this.syncChrome(); }
   button(parent, text, onclick, cls = '') {
     const b = el('button', 'btn ' + cls, parent); b.textContent = text;
     b.addEventListener('click', (e) => { e.stopPropagation(); this.game.audio.init(); this.game.audio.play('click'); onclick(b); });
@@ -561,11 +612,31 @@ export class UI {
     upd();
     return s;
   }
+  showDialog({ title, message, value, placeholder, confirmText, danger, onConfirm }) {
+    const host = document.getElementById('menu') || document.body;
+    const back = el('div', 'dlg-back', host);
+    const box = el('div', 'dlg', back);
+    el('div', 'm-h txt', box, title);
+    if (message) el('div', 'txt dlg-msg', box, message);
+    let input = null;
+    if (value !== undefined) {
+      input = el('input', '', box); input.value = value;
+      if (placeholder) input.placeholder = placeholder;
+      input.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') ok(); if (e.key === 'Escape') back.remove(); });
+    }
+    const row = el('div', 'm-row', box);
+    const ok = () => { const v = input ? input.value : true; back.remove(); if (onConfirm) onConfirm(v); };
+    this.button(row, confirmText || '确定', ok, 'half' + (danger ? ' danger' : ''));
+    this.button(row, '取消', () => back.remove(), 'half');
+    if (input) setTimeout(() => input.focus(), 0);
+  }
   titleBlock(m) {
     const t = el('div', 'm-title', m, '我的世界');
     if (this.stoneURL) t.style.backgroundImage = `url(${this.stoneURL})`;
     const splashes = ['网页版！', '纯程序生成！', '也试试方块！', '100% 原创像素！', '无限世界！', '用 Three.js 制作！', '挖矿与合成！', '小心苦力怕…其实没有！'];
-    el('div', 'splash', t, splashes[Math.floor(Math.random() * splashes.length)]);
+    const splashText = splashes[Math.floor(Math.random() * splashes.length)];
+    const sp = el('div', 'splash', t, splashText);
+    if (splashText.length > 8) sp.style.fontSize = px(8);
     el('div', 'm-sub txt', m, 'MINI MINECRAFT · 网页复刻版');
   }
   showTitle() {
@@ -589,23 +660,43 @@ export class UI {
     let sel = worlds[0] ? worlds[0].id : null;
     const render = () => {
       list.innerHTML = '';
-      if (!worlds.length) el('div', 'world g', list, '还没有世界，点击“创建新的世界”开始吧！');
+      if (!worlds.length) el('div', 'world empty', list, '还没有世界，点击“创建新的世界”开始吧！');
       for (const w of worlds) {
         const d = el('div', 'world' + (w.id === sel ? ' sel' : ''), list);
         const date = new Date(w.lastPlayed || w.created).toLocaleString('zh-CN');
         d.innerHTML = `<div>${escapeHTML(w.name)}</div><div class="g">${w.id.slice(0, 8)} (${date})</div><div class="g">${w.mode === 'creative' ? '创造模式' : '生存模式'}，种子：${escapeHTML(String(w.seedText ?? w.seed))}</div>`;
-        d.addEventListener('click', () => { sel = w.id; render(); });
+        d.addEventListener('click', () => { sel = w.id; render(); syncBtns(); });
         d.addEventListener('dblclick', () => this.game.loadWorld(w.id));
       }
     };
-    render();
     const c = el('div', 'm-col', m); c.style.marginTop = px(8);
     const r1 = el('div', 'm-row', c), r2 = el('div', 'm-row', c);
-    this.button(r1, '进入选中的世界', () => sel && this.game.loadWorld(sel), 'half');
+    const enterBtn = this.button(r1, '进入选中的世界', () => sel && this.game.loadWorld(sel), 'half');
     this.button(r1, '创建新的世界', () => this.showCreate(), 'half');
-    this.button(r2, '删除', async () => { if (!sel) return; if (!confirm('确定要删除这个世界吗？此操作无法撤销！')) return; await this.game.deleteWorld(sel); this.showWorlds(); }, 'third');
-    this.button(r2, '重命名', async () => { const w = worlds.find((x) => x.id === sel); if (!w) return; const n = prompt('新名称', w.name); if (n) { w.name = n; await this.game.renameWorld(w); this.showWorlds(); } }, 'third');
+    const delBtn = this.button(r2, '删除', () => {
+      if (!sel) return;
+      const w = worlds.find((x) => x.id === sel);
+      this.showDialog({
+        title: '删除世界',
+        message: `确定要删除“${w ? w.name : ''}”吗？此操作无法撤销！`,
+        confirmText: '删除',
+        danger: true,
+        onConfirm: async () => { await this.game.deleteWorld(sel); this.showWorlds(); },
+      });
+    }, 'third');
+    const renBtn = this.button(r2, '重命名', () => {
+      const w = worlds.find((x) => x.id === sel); if (!w) return;
+      this.showDialog({
+        title: '重命名世界',
+        value: w.name,
+        confirmText: '确定',
+        onConfirm: async (n) => { const name = String(n || '').trim(); if (!name) return; w.name = name; await this.game.renameWorld(w); this.showWorlds(); },
+      });
+    }, 'third');
     this.button(r2, '取消', () => this.showTitle(), 'third');
+    const syncBtns = () => { enterBtn.disabled = delBtn.disabled = renBtn.disabled = !sel; };
+    render();
+    syncBtns();
   }
   showCreate() {
     const m = this.menu('dirt');
@@ -614,7 +705,7 @@ export class UI {
     const f1 = el('label', 'field', c, '世界名称'); const name = el('input', '', f1); name.value = '新的世界';
     let mode = 'survival';
     const mb = this.button(c, '', () => { mode = mode === 'survival' ? 'creative' : 'survival'; upd(); });
-    const desc = el('div', 'txt', c); desc.style.fontSize = px(7); desc.style.color = '#a0a0a0'; desc.style.maxWidth = px(220); desc.style.textAlign = 'center';
+    const desc = el('div', 'txt field-desc', c); desc.style.fontSize = px(7); desc.style.color = '#a0a0a0';
     const upd = () => { mb.textContent = '游戏模式：' + (mode === 'survival' ? '生存' : '创造'); desc.textContent = mode === 'survival' ? '探索神秘的世界，收集资源、合成工具，注意生命值与饥饿值。' : '无限资源、自由飞行、瞬间破坏方块。'; };
     upd();
     const f2 = el('label', 'field', c, '世界生成器的种子（留空则随机）'); const seed = el('input', '', f2); seed.placeholder = '例如：12345 或任意文字';
@@ -631,7 +722,7 @@ export class UI {
     const sv = () => g.applySettings();
     this.slider(grid, '视野', 30, 110, 1, s.fov, (v) => (v === 70 ? '普通' : v === 110 ? '极高' : v), (v) => { s.fov = v; sv(); });
     this.slider(grid, '渲染距离', 2, 16, 1, s.renderDistance, (v) => v + ' 区块', (v) => { s.renderDistance = v; sv(); });
-    this.slider(grid, '鼠标灵敏度', 10, 200, 1, s.sensitivity, (v) => v + '%', (v) => { s.sensitivity = v; sv(); });
+    this.slider(grid, '鼠标灵敏度', 10, 200, 1, s.sensitivity, (v) => (v === 100 ? '100%（默认）' : v + '%'), (v) => { s.sensitivity = v; sv(); });
     this.slider(grid, '亮度', 0, 100, 1, s.gamma, (v) => (v === 0 ? '昏暗' : v === 100 ? '明亮' : v + '%'), (v) => { s.gamma = v; sv(); });
     this.slider(grid, '主音量', 0, 100, 1, s.volume, (v) => v + '%', (v) => { s.volume = v; sv(); });
     this.slider(grid, '音乐', 0, 100, 1, s.music, (v) => (v ? v + '%' : '关'), (v) => { s.music = v; sv(); });
@@ -678,8 +769,9 @@ export class UI {
     el('h1', '', d, '你死了！');
     el('div', 'txt', d, msg || '').style.fontSize = px(8);
     const c = el('div', 'm-col', d); c.style.marginTop = px(20);
-    this.button(c, '重生', () => { d.remove(); this.game.respawn(); });
+    this.button(c, '重生', () => { d.remove(); this.syncChrome(); this.game.respawn(); });
     this.button(c, '回到标题画面', () => { d.remove(); this.game.saveAndQuit(); });
+    this.syncChrome();
   }
   showLoading(text, prog) {
     let m = $('#menu');
