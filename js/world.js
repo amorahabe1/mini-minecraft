@@ -1,6 +1,6 @@
 // 世界：区块加载/卸载、Worker 池、方块读写、方块更新（液体/重力/支撑）、随机刻
 import * as THREE from 'three';
-import { CHUNK, HEIGHT, SEA, BLOCKS, B, OPAQUE, SOLID, LIGHT_OPACITY, LIGHT_EMIT, isLiquid, isWater, isLava, liquidId, MAX_LEVEL } from './registry.js';
+import { CHUNK, HEIGHT, SEA, BLOCKS, B, OPAQUE, SOLID, LIGHT_OPACITY, LIGHT_EMIT, isLiquid, isWater, isLava, liquidId, MAX_LEVEL, isDoor, doorState } from './registry.js';
 import { WorldGen, placeTree, BIOME } from './worldgen.js';
 import { hash3 } from './noise.js';
 
@@ -291,6 +291,8 @@ export class World {
       return;
     }
     if (b.needsSupport && !this.hasSupport(x, y, z, b)) this.schedule(x, y, z, 1);
+    if ((b.door || b.bed) && !this.pairOk(x, y, z, id)) this.schedule(x, y, z, 1);
+    if (id === B.farmland) { const a = this.getBlock(x, y + 1, z); if (a > 0 && SOLID[a] && !BLOCKS[a].crop) this.schedule(x, y, z, 1); }
     // 水流动到旁边空气时
     for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]) {
       const n = this.getBlock(x + dx, y + dy, z + dz);
@@ -309,6 +311,7 @@ export class World {
         return true;
       }
       case 'below': return below > 0 && OPAQUE[below] === 1;
+      case 'farmland': return below === B.farmland;
       case 'wall': {
         const d = [[0, 1], [-1, 0], [0, -1], [1, 0]][b.facing];
         const w = this.getBlock(x + d[0], y, z + d[1]);
@@ -346,6 +349,40 @@ export class World {
       this.setBlock(x, y, z, 0);
       this.game.dropBlockItems(x, y, z, id, null);
     }
+    if ((b.door || b.bed) && !this.pairOk(x, y, z, id)) {
+      // 另一半已不存在：门的下半若失去支撑会掉落物品；否则静默移除
+      const dropIt = b.door && !b.door.upper && this.getBlock(x, y + 1, z) > 0 && isDoor(this.getBlock(x, y + 1, z));
+      this.setBlock(x, y, z, 0);
+      if (dropIt) this.game.dropBlockItems(x, y, z, id, null);
+    }
+    if (id === B.farmland) { const a = this.getBlock(x, y + 1, z); if (a > 0 && SOLID[a] && !BLOCKS[a].crop) this.setBlock(x, y, z, B.dirt); }
+  }
+  // 门 / 床：两格结构的另一半是否完好
+  pairOk(x, y, z, id) {
+    const b = BLOCKS[id];
+    if (b.door) {
+      const s = doorState(id);
+      if (s.upper) { const lo = this.getBlock(x, y - 1, z); return lo < 0 || (lo > 0 && isDoor(lo) && !doorState(lo).upper); }
+      const up = this.getBlock(x, y + 1, z);
+      if (!(up < 0 || (up > 0 && isDoor(up) && doorState(up).upper))) return false;
+      const below = this.getBlock(x, y - 1, z);
+      return below < 0 || (below > 0 && SOLID[below] && !isDoor(below) && !BLOCKS[below].bed);
+    }
+    if (b.bed) {
+      const d = [[0, 1], [-1, 0], [0, -1], [1, 0]][b.facing];
+      const sgn = b.bed.head ? -1 : 1;
+      const o = this.getBlock(x + d[0] * sgn, y, z + d[1] * sgn);
+      if (o < 0) return true;
+      return o > 0 && BLOCKS[o].bed && BLOCKS[o].facing === b.facing && BLOCKS[o].bed.head !== b.bed.head;
+    }
+    return true;
+  }
+  isMoist(x, y, z) {
+    for (let dy = 0; dy <= 1; dy++) for (let dz = -4; dz <= 4; dz++) for (let dx = -4; dx <= 4; dx++) {
+      const n = this.getBlock(x + dx, y + dy, z + dz);
+      if (n > 0 && isWater(n)) return true;
+    }
+    return this.game.isRainingAt ? this.game.isRainingAt(x, y + 1, z) : false;
   }
   liquidTick(x, y, z, id, b) {
     const type = b.liquid;
@@ -452,7 +489,23 @@ export class World {
         if (id === 0) continue;
         const x = c.cx * 16 + lx, z = c.cz * 16 + lz;
         const b = BLOCKS[id];
-        if (b.sapling) {
+        if (b.crop && b.age < 7) {
+          const l = this.lightAt(x, ly, z);
+          if (Math.max(l.sky - (this.game.skyDarken || 0), l.block) >= 9) {
+            // Java CropBlock.getGrowthSpeed
+            let f = 1;
+            for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+              let f1 = 0;
+              if (this.getBlock(x + i, ly - 1, z + j) === B.farmland) { f1 = 1; if (this.isMoist(x + i, ly - 1, z + j)) f1 = 3; }
+              if (i || j) f1 /= 4;
+              f += f1;
+            }
+            if (Math.random() < 1 / (Math.floor(25 / f) + 1)) this.setBlock(x, ly, z, id + 1);
+          }
+        } else if (id === B.farmland) {
+          const above = this.getBlock(x, ly + 1, z);
+          if (!(above > 0 && BLOCKS[above].crop) && !this.isMoist(x, ly, z)) this.setBlock(x, ly, z, B.dirt);
+        } else if (b.sapling) {
           if (Math.random() < 1 / 7) this.growTree(x, ly, z, b.sapling);
         } else if (id === B.grass_block) {
           const above = this.getBlock(x, ly + 1, z);

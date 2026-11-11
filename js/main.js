@@ -1,13 +1,14 @@
 // 游戏主控：渲染循环（20 TPS + 插值）、输入、交互（挖掘/放置/使用）、实体、存档、命令
 import * as THREE from 'three';
-import { BLOCKS, B, I, ITEMS, TILES, FACE_TILES, SOLID, OPAQUE, HEIGHT, SEA, isLiquid, isWater, isLava, liquidId, canHarvest, digSpeed, idOf, itemName, maxStack, FACING_DIRS } from './registry.js';
+import { BLOCKS, B, I, ITEMS, TILES, FACE_TILES, SOLID, OPAQUE, HEIGHT, SEA, isLiquid, isWater, isLava, liquidId, canHarvest, digSpeed, idOf, itemName, maxStack, FACING_DIRS, SHAPE, SHAPES, SELECT, isDoor, doorState, doorId, DOOR_BASE, isBed, durabilityOf, ARMOR_MATS } from './registry.js';
 import { hashSeed } from './noise.js';
 import { BIOME, BIOME_NAMES } from './worldgen.js';
+import { villagesForChunk, nearestVillage } from './village.js';
 import { World } from './world.js';
-import { createTextureArray, createChunkMaterials, Sky, BlockHighlight, ItemModels, brightness } from './render.js';
+import { createTextureArray, createChunkMaterials, Sky, BlockHighlight, ItemModels, brightness, WeatherRenderer, createLightningMesh } from './render.js';
 import { buildTextures, tileCanvases, buildIcons } from './textures.js';
-import { entityBox, boxCollides } from './physics.js';
-import { Mob, ItemEntity, FallingBlock, Particles } from './entities.js';
+import { entityBox, boxCollides, raycastBlocks, blockShapes } from './physics.js';
+import { Mob, ItemEntity, FallingBlock, Particles, Arrow, bowPower, MOB_DEFS } from './entities.js';
 import { Audio } from './audio.js';
 import * as Store from './storage.js';
 import { CraftGrid, newFurnace, newChest, furnaceTick, cloneStack } from './inventory.js';
@@ -17,7 +18,10 @@ import { Hand, createPlayerModel, animatePlayerModel, previewCanvas } from './ha
 
 const TICK = 50;
 const FACE_NORMALS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-const DEATH_MSG = { fall: '从高处摔了下来', lava: '试图在岩浆里游泳', drown: '淹死了', mob: '被僵尸杀死了', starve: '饿死了', suffocate: '在墙里窒息而亡', void: '掉出了这个世界', fire: '被烧死了', kill: '死了' };
+const DEATH_MSG = { fall: '从高处摔了下来', lava: '试图在岩浆里游泳', drown: '淹死了', mob: '被僵尸杀死了', starve: '饿死了', suffocate: '在墙里窒息而亡', void: '掉出了这个世界', fire: '被烧死了', kill: '死了', arrow: '被骷髅射杀', explosion: '爆炸了', lightning: '被闪电击中', web: '死了' };
+// Java 天气持续时间（刻）
+const uniform = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const CLEAR_DURATION = [12000, 180000], RAIN_DURATION = [12000, 24000], THUNDER_DURATION = [3600, 15600], RAIN_DELAY = [12000, 180000], THUNDER_DELAY = [12000, 180000];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'w' + Date.now().toString(16) + Math.random().toString(16).slice(2));
 
 // 方块的选取包围盒（局部坐标）
@@ -84,6 +88,8 @@ class Game {
     this.sky = new Sky(this.skyScene, this.scene);
     this.highlight = new BlockHighlight(this.scene, this.texArray);
     this.particles = new Particles(this.scene, this.itemModels);
+    this.weatherR = new WeatherRenderer(this.scene);
+    this.weather = this.newWeather(); this.bolts = []; this.skyFlash = 0; this.shake = 0;
     this.hand = new Hand(this.itemModels);
     this.playerModel = createPlayerModel(); this.playerModel.visible = false; this.scene.add(this.playerModel);
     this.player = new Player(this);
@@ -163,6 +169,10 @@ class Game {
     this.scene.add(this.world.group);
     this.time = meta.time || 0;
     this.tiles = new Map((meta.tiles || []).map((t) => [t.k, t.v]));
+    for (const b of this.bolts || []) this.scene.remove(b.mesh);
+    this.bolts = []; this.skyFlash = 0;
+    this.weather = Object.assign(this.newWeather(), meta.weather || {});
+    this.villagesSpawned = new Set();
     const p = this.player = new Player(this);
     p.mode = meta.mode || 'survival';
     if (meta.player) p.load(meta.player);
@@ -227,6 +237,7 @@ class Game {
     if (!this.world || !this.meta || this.loading) return;
     const m = this.meta;
     m.time = this.time; m.lastPlayed = Date.now(); m.mode = this.player.mode;
+    m.weather = { ...this.weather };
     m.player = this.player.toJSON();
     m.tiles = [...this.tiles].map(([k, v]) => ({ k, v }));
     const jobs = [Store.saveWorldMeta(m)];
@@ -403,10 +414,19 @@ class Game {
     for (let i = 0; i < 200; i++) {
       const id = w.getBlock(x, y, z);
       if (id > 0) {
-        const bb = blockBox(id, includeLiquid);
-        if (bb) {
-          const hit = rayBox(oa, da, [x + bb[0], y + bb[1], z + bb[2], x + bb[3], y + bb[4], z + bb[5]]);
-          if (hit && hit.t <= maxDist) return { x, y, z, id, n: hit.n, t: hit.t };
+        if (SHAPE[id] === SHAPES.MODEL) {
+          let best = null;
+          for (const bb of SELECT[id] || []) {
+            const hit = rayBox(oa, da, [x + bb[0], y + bb[1], z + bb[2], x + bb[3], y + bb[4], z + bb[5]]);
+            if (hit && hit.t <= maxDist && (!best || hit.t < best.t)) best = hit;
+          }
+          if (best) return { x, y, z, id, n: best.n, t: best.t, hp: [o.x + d.x * best.t, o.y + d.y * best.t, o.z + d.z * best.t] };
+        } else {
+          const bb = blockBox(id, includeLiquid);
+          if (bb) {
+            const hit = rayBox(oa, da, [x + bb[0], y + bb[1], z + bb[2], x + bb[3], y + bb[4], z + bb[5]]);
+            if (hit && hit.t <= maxDist) return { x, y, z, id, n: hit.n, t: hit.t, hp: [o.x + d.x * hit.t, o.y + d.y * hit.t, o.z + d.z * hit.t] };
+          }
         }
       }
       const t = Math.min(tmx, tmy, tmz);
@@ -434,6 +454,7 @@ class Game {
   interactTick() {
     const p = this.player;
     if (p.dead) return;
+    if (p.sleeping) { this.target = null; this.pressLeft = this.pressRight = false; return; }
     const reach = this.reach();
     const blockHit = this.raycast(reach);
     const entHit = this.raycastEntity(p.mode === 'creative' ? 5 : 3);
@@ -456,10 +477,14 @@ class Game {
     // 右键
     if (this.pressRight) { this.pressRight = false; this.useItem(target); this.useDelay = 4; }
     else if (this.mouse.right && !p.usingItem && this.useDelay <= 0) { this.useItem(target); this.useDelay = 4; }
-    // 进食
+    // 持续使用物品：拉弓 / 进食
     if (p.usingItem) {
       const h = p.inventory.held();
-      if (!this.mouse.right || !h || h.id !== p.usingId) { p.usingItem = false; }
+      if (!h || h.id !== p.usingId) { p.usingItem = false; p.usingBow = false; }
+      else if (p.usingBow) {
+        p.useTicks++;
+        if (!this.mouse.right) this.releaseBow(h);
+      } else if (!this.mouse.right) { p.usingItem = false; }
       else {
         p.useTicks++;
         if (p.useTicks > 7 && p.useTicks % 4 === 0) this.audio.play('eat');
@@ -470,6 +495,28 @@ class Game {
         }
       }
     }
+  }
+  // 松开右键射箭（Java BowItem.releaseUsing）
+  releaseBow(h) {
+    const p = this.player, inv = p.inventory;
+    p.usingItem = false; p.usingBow = false; this.useDelay = 4;
+    const creative = p.mode === 'creative';
+    const ai = inv.findArrow();
+    if (ai < 0 && !creative) return;
+    const f = bowPower(p.useTicks);
+    if (f < 0.1) return;
+    const e = this.eyePos();
+    const a = new Arrow(this, e.x, e.y - 0.1, e.z, p, { base: 2, crit: f === 1, pickup: !creative });
+    const d = this.lookDir();
+    a.shoot(d.x, d.y, d.z, f * 3, 1);
+    a.vel.x += p.vel.x; a.vel.z += p.vel.z; if (!p.onGround) a.vel.y += p.vel.y;
+    this.addEntity(a);
+    this.audio.play('bow_shoot', { vol: 0.9 });
+    if (!creative) {
+      const s = inv.slots[ai]; s.count--; if (s.count <= 0) inv.slots[ai] = null;
+      this.damageHeld(1);
+    }
+    void h;
   }
   resetBreak() {
     if (this.breaking) { this.breaking = null; this.highlight.setCrack(0, 0, 0, -1); }
@@ -509,7 +556,9 @@ class Game {
     this.particles.blockBreak(x, y, z, FACE_TILES[id * 6 + 0], 1);
     if (survival) {
       const tool = this.heldTool();
-      if (canHarvest(b, tool)) this.dropBlockItems(x, y, z, id, tool);
+      // 门的上半部分掉落门物品（另一半随后被移除且不掉落）
+      if (b.door && b.door.upper) { if (canHarvest(b, tool)) this.dropBlockItems(x, y, z, doorId(0, 0, 0, 0), tool); }
+      else if (canHarvest(b, tool)) this.dropBlockItems(x, y, z, id, tool);
       else this.dropTileContents(x, y, z);
       if (tool && b.hardness > 0) this.damageHeld(1);
       this.player.addExhaustion(0.005);
@@ -520,7 +569,8 @@ class Game {
   damageHeld(n) {
     const p = this.player;
     if (p.mode !== 'survival') return;
-    if (p.inventory.damageHeld(n)) { this.audio.play('fallsmall'); this.ui.addMessage('工具损坏了！'); }
+    const h = p.inventory.held(); const name = h ? itemName(h.id) : '';
+    if (p.inventory.damageHeld(n)) { this.audio.play('item_break'); this.ui.addMessage(name + '损坏了！'); }
   }
   attack(mob) {
     const p = this.player;
@@ -542,17 +592,37 @@ class Game {
   }
   useItem(t) {
     const p = this.player, w = this.world;
+    if (p.sleeping) return;
     const held = p.inventory.held();
     const d = held && ITEMS.get(held.id);
-    // 打开容器
-    if (t && !t.entity && !p.sneaking) {
+    // 方块交互（潜行且手持物品时跳过，与 MC 一致）
+    if (t && !t.entity && t.id > 0 && !(p.sneaking && held)) {
       const b = BLOCKS[t.id];
+      if (b.interact === 'door') { this.swing(); this.toggleDoor(t.x, t.y, t.z); return; }
+      if (b.interact === 'bed') { this.swing(); this.useBed(t.x, t.y, t.z, t.id); return; }
+      if (b.interact === 'bell') { this.swing(); this.ringBell(t.x, t.y, t.z); return; }
       if (b.interact) { this.swing(); this.openContainer(t.x, t.y, t.z, b); return; }
     }
+    if (t && t.entity && t.entity.kind === 'villager') { this.audio.play('villager', { at: t.entity.pos }); t.entity.lookYaw = Math.atan2(p.pos.x - t.entity.pos.x, p.pos.z - t.entity.pos.z) + Math.PI; return; }
     if (!held) return;
+    // 盔甲：右键穿戴（与已穿戴的交换）
+    if (d.armor) {
+      const inv = p.inventory, si = d.armor.slot;
+      const cur = inv.armor[si];
+      inv.armor[si] = { id: held.id, count: 1, dmg: held.dmg || 0 };
+      inv.slots[inv.selected] = cur;
+      this.audio.play('armor_equip', { material: d.armor.material });
+      this.swing();
+      return;
+    }
+    // 弓：需要箭（创造模式除外）
+    if (d.bow) {
+      if (p.mode === 'creative' || p.inventory.findArrow() >= 0) { p.usingItem = true; p.usingBow = true; p.usingId = held.id; p.useTicks = 0; this.audio.play('bow_pull', { vol: 0.6 }); }
+      return;
+    }
     // 食物
     if (d.food) {
-      if (p.canEat()) { p.usingItem = true; p.usingId = held.id; p.useTicks = 0; }
+      if (p.canEat()) { p.usingItem = true; p.usingBow = false; p.usingId = held.id; p.useTicks = 0; }
       return;
     }
     // 桶
@@ -581,31 +651,113 @@ class Game {
       if (p.mode === 'survival') p.inventory.slots[p.inventory.selected] = { id: I.bucket, count: 1, dmg: 0 };
       return;
     }
+    if (!t || t.entity) return;
+    // 锄：耕地；锹：土径
+    if (d.tool && (d.tool.type === 'hoe' || d.tool.type === 'shovel')) {
+      const above = w.getBlock(t.x, t.y + 1, t.z);
+      if (t.n[1] !== -1 && above === 0) {
+        let to = null;
+        if (d.tool.type === 'hoe' && (t.id === B.grass_block || t.id === B.dirt || t.id === B.dirt_path || t.id === B.snowy_grass_block)) to = B.farmland;
+        if (d.tool.type === 'shovel' && (t.id === B.grass_block || t.id === B.dirt || t.id === B.snowy_grass_block)) to = B.dirt_path;
+        if (to) { w.setBlock(t.x, t.y, t.z, to); this.audio.play('hoe'); this.audio.step('grass'); this.swing(); this.damageHeld(1); return; }
+      }
+      if (!d.isBlock) return;
+    }
+    // 骨粉
+    if (d.boneMeal) {
+      const b = BLOCKS[t.id];
+      let used = false;
+      if (b.crop && b.age < 7) { w.setBlock(t.x, t.y, t.z, t.id + Math.min(7 - b.age, uniform(2, 5))); used = true; }
+      else if (b.sapling) { if (Math.random() < 0.45) w.growTree(t.x, t.y, t.z, b.sapling); used = true; }
+      else if (t.id === B.grass_block && w.getBlock(t.x, t.y + 1, t.z) === 0) {
+        const plants = [B.short_grass ?? B.tall_grass ?? B.grass, B.dandelion, B.poppy].filter((v) => v !== undefined);
+        for (let i = 0; i < 24; i++) {
+          const x = t.x + uniform(-3, 3), z = t.z + uniform(-3, 3);
+          for (let dy = 1; dy >= -1; dy--) {
+            const y = t.y + dy;
+            if (w.getBlock(x, y, z) === B.grass_block && w.getBlock(x, y + 1, z) === 0) { w.setBlock(x, y + 1, z, Math.random() < 0.85 ? plants[0] : plants[1 + (Math.random() * (plants.length - 1)) | 0]); break; }
+          }
+        }
+        used = true;
+      }
+      if (used) {
+        for (let i = 0; i < 8; i++) this.particles.crit(t.x + Math.random(), t.y + 1 + Math.random() * 0.5, t.z + Math.random(), 1);
+        this.swing(); if (p.mode === 'survival') p.inventory.consumeHeld(1);
+      }
+      return;
+    }
+    // 种子：种在耕地上
+    if (d.plant) {
+      if (t.id === B.farmland && t.n[1] === 1 && w.getBlock(t.x, t.y + 1, t.z) === 0) {
+        w.setBlock(t.x, t.y + 1, t.z, d.block);
+        this.audio.place('grass'); this.swing();
+        if (p.mode === 'survival') p.inventory.consumeHeld(1);
+      }
+      return;
+    }
+    if (d.placeDoor) { this.placeDoor(t, held, d); return; }
+    if (d.placeBed !== undefined) { this.placeBed(t, held, d); return; }
     // 放置方块
-    if (d.isBlock && t && !t.entity) this.placeBlock(t, held, d);
+    if (d.isBlock) this.placeBlock(t, held, d);
+  }
+  // 玩家水平视线方向（0 南 1 西 2 北 3 东）
+  lookFacing() {
+    const p = this.player, fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+    let best = 0, bd = -2;
+    FACING_DIRS.forEach((v, i) => { const dd = v[0] * fx + v[2] * fz; if (dd > bd) { bd = dd; best = i; } });
+    return best;
+  }
+  placePos(t) {
+    const tb = BLOCKS[t.id];
+    let x = t.x, y = t.y, z = t.z;
+    if (!(tb.replaceable && !tb.liquid)) { x += t.n[0]; y += t.n[1]; z += t.n[2]; }
+    return [x, y, z];
+  }
+  replaceableAt(x, y, z) { const id = this.world.getBlock(x, y, z); return id === 0 || (id > 0 && BLOCKS[id].replaceable); }
+  // 方块形状是否与玩家 / 生物重叠
+  obstructed(x, y, z, id) {
+    const boxes = SHAPE[id] === SHAPES.MODEL ? blockShapes(id, 'collide') : (BLOCKS[id].solid ? [[0, 0, 0, 1, 1, 1]] : []);
+    const ents = [this.player, ...this.entities.filter((e) => e instanceof Mob && !e.dead)];
+    for (const bx of boxes) {
+      const box = [x + bx[0], y + bx[1], z + bx[2], x + bx[3], y + bx[4], z + bx[5]];
+      for (const e of ents) { const eb = entityBox(e); if (eb[0] < box[3] && eb[3] > box[0] && eb[1] < box[4] && eb[4] > box[1] && eb[2] < box[5] && eb[5] > box[2]) return true; }
+    }
+    return false;
   }
   placeBlock(t, held, d) {
     const p = this.player, w = this.world;
-    const tb = BLOCKS[t.id];
-    let x = t.x, y = t.y, z = t.z, n = t.n;
-    if (!(tb.replaceable && !tb.liquid)) { x += n[0]; y += n[1]; z += n[2]; }
-    if (y < 0 || y >= HEIGHT) return;
-    const cur = w.getBlock(x, y, z);
-    if (cur < 0 || (cur > 0 && !BLOCKS[cur].replaceable)) return;
+    const n = t.n, hp = t.hp || [t.x + 0.5, t.y + 0.5, t.z + 0.5];
     let id = d.block;
     const nb = BLOCKS[id];
-    // 火把：侧面 → 墙上火把；底面不可放置
-    if (id === B.torch) {
+    // 台阶：点击同种单台阶的对应面 → 双层台阶（Java SlabBlock.canBeReplaced）
+    if (nb.slab) {
+      const ti = BLOCKS[t.id].slab;
+      if (ti && ti.mat === nb.slab.mat && ti.half !== 2) {
+        const upper = hp[1] - t.y > 0.5;
+        const ok = ti.half === 0 ? (n[1] === 1 || (upper && n[1] === 0)) : (n[1] === -1 || (!upper && n[1] === 0));
+        if (ok) { this.finishPlace(t.x, t.y, t.z, id - nb.slab.half + 2, t.id); return; }
+      }
+    }
+    const [x, y, z] = this.placePos(t);
+    if (y < 0 || y >= HEIGHT) return;
+    const cur = w.getBlock(x, y, z);
+    // 目标格已有同种单台阶 → 合并
+    if (nb.slab && cur > 0 && BLOCKS[cur].slab && BLOCKS[cur].slab.mat === nb.slab.mat && BLOCKS[cur].slab.half !== 2) { this.finishPlace(x, y, z, id - nb.slab.half + 2, cur); return; }
+    if (cur < 0 || (cur > 0 && !BLOCKS[cur].replaceable)) return;
+    // 上下半：点击底面 → 上半；点击顶面 → 下半；点击侧面 → 取决于点击高度
+    const top = n[1] === -1 || (n[1] === 0 && hp[1] - y > 0.5);
+    if (nb.slab) id = id - nb.slab.half + (top ? 1 : 0);
+    else if (nb.stairs) id = id - (nb.stairs.half * 4 + nb.facing) + (top ? 4 : 0) + this.lookFacing();
+    else if (id === B.torch) {
+      // 火把：侧面 → 墙上火把；底面不可放置
       if (n[1] < 0 && t.id !== cur) return;
       if (n[1] === 0 && (n[0] || n[2])) {
-        // 墙在法线反方向
         const wx = -n[0], wz = -n[2];
         const f = [[0, 1], [-1, 0], [0, -1], [1, 0]].findIndex(([a, b]) => a === wx && b === wz);
         id = 112 + f;
       }
-    }
-    // 朝向方块：正面朝向玩家
-    if (nb.facing !== undefined && nb.baseKey) {
+    } else if (nb.facing !== undefined && nb.baseKey) {
+      // 朝向方块：正面朝向玩家
       const fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);
       let best = 0, bd = -2;
       FACING_DIRS.forEach((v, i) => { const dd = v[0] * fx + v[2] * fz; if (dd > bd) { bd = dd; best = i; } });
@@ -613,20 +765,308 @@ class Game {
     }
     const b = BLOCKS[id];
     if (b.needsSupport && !w.hasSupport(x, y, z, b)) return;
-    // 不能放进实体内
-    if (b.solid) {
-      const box = [x, y, z, x + 1, y + 1, z + 1];
-      const hits = (e) => { const eb = entityBox(e); return eb[0] < box[3] && eb[3] > box[0] && eb[1] < box[4] && eb[4] > box[1] && eb[2] < box[5] && eb[5] > box[2]; };
-      if (hits(p)) return;
-      for (const e of this.entities) if (e instanceof Mob && !e.dead && hits(e)) return;
-    }
+    if ((b.solid || SHAPE[id] === SHAPES.MODEL) && this.obstructed(x, y, z, id)) return;
     if (cur > 0 && isLiquid(cur) && (b.shape === 'cross' || b.shape === 'torch' || b.shape === 'wall_torch')) return;
+    this.finishPlace(x, y, z, id, cur);
+  }
+  finishPlace(x, y, z, id, cur) {
+    const p = this.player, w = this.world, b = BLOCKS[id];
+    if (BLOCKS[id].slab && BLOCKS[id].slab.half === 2 && this.obstructed(x, y, z, id)) return;
     w.setBlock(x, y, z, id);
     if (b.gravity) w.schedule(x, y, z, 2);
     this.audio.place(b.sound);
     this.swing();
     if (p.mode === 'survival') p.inventory.consumeHeld(1);
+    void cur;
   }
+  // 门（Java DoorBlock.getStateForPlacement / getHinge）
+  placeDoor(t, held, d) {
+    const p = this.player, w = this.world;
+    const [x, y, z] = this.placePos(t);
+    if (y < 1 || y + 1 >= HEIGHT) return;
+    if (!this.replaceableAt(x, y, z) || !this.replaceableAt(x, y + 1, z)) return;
+    const below = w.getBlock(x, y - 1, z);
+    if (!(below > 0 && SOLID[below] && OPAQUE[below])) return;
+    const f = this.lookFacing();
+    const L = FACING_DIRS[(f + 3) % 4], R = FACING_DIRS[(f + 1) % 4];
+    const full = (id) => id > 0 && OPAQUE[id] === 1;
+    const g = (dx, dy, dz) => w.getBlock(x + dx, y + dy, z + dz);
+    const i = (full(g(L[0], 0, L[2])) ? -1 : 0) + (full(g(L[0], 1, L[2])) ? -1 : 0) + (full(g(R[0], 0, R[2])) ? 1 : 0) + (full(g(R[0], 1, R[2])) ? 1 : 0);
+    const lowerDoor = (id) => id > 0 && isDoor(id) && !doorState(id).upper;
+    const flagL = lowerDoor(g(L[0], 0, L[2])), flagR = lowerDoor(g(R[0], 0, R[2]));
+    let right;
+    if ((!flagL || flagR) && i <= 0) {
+      if ((!flagR || flagL) && i >= 0) {
+        const j = FACING_DIRS[f][0], k = FACING_DIRS[f][2];
+        const hp = t.hp || [x + 0.5, y, z + 0.5];
+        const d0 = hp[0] - x, d1 = hp[2] - z;
+        const left = (j >= 0 || !(d1 < 0.5)) && (j <= 0 || !(d1 > 0.5)) && (k >= 0 || !(d0 > 0.5)) && (k <= 0 || !(d0 < 0.5));
+        right = !left;
+      } else right = false;
+    } else right = true;
+    const lo = doorId(0, 0, right, f), up = doorId(1, 0, right, f);
+    if (this.obstructed(x, y, z, lo) || this.obstructed(x, y + 1, z, up)) return;
+    w.setBlock(x, y, z, lo); w.setBlock(x, y + 1, z, up);
+    this.audio.place('wood'); this.swing();
+    if (p.mode === 'survival') p.inventory.consumeHeld(1);
+  }
+  // 床（Java BedItem：朝向 = 视线方向，床头在前方一格）
+  placeBed(t, held, d) {
+    const p = this.player, w = this.world;
+    const [x, y, z] = this.placePos(t);
+    if (y < 0 || y >= HEIGHT) return;
+    const f = this.lookFacing(), dir = FACING_DIRS[f];
+    const hx = x + dir[0], hz = z + dir[2];
+    if (!this.replaceableAt(x, y, z) || !this.replaceableAt(hx, y, hz)) return;
+    const base = 68 + d.placeBed * 8 + f * 2;
+    if (this.obstructed(x, y, z, base) || this.obstructed(hx, y, hz, base + 1)) return;
+    w.setBlock(x, y, z, base); w.setBlock(hx, y, hz, base + 1);
+    this.audio.place('wood'); this.swing();
+    if (p.mode === 'survival') p.inventory.consumeHeld(1);
+  }
+  // 门的开关
+  toggleDoor(x, y, z) {
+    const id = this.world.getBlock(x, y, z);
+    if (!(id > 0 && isDoor(id))) return;
+    const s = doorState(id);
+    this.setDoorOpen(x, s.upper ? y - 1 : y, z, !s.open, true);
+  }
+  setDoorOpen(x, y, z, open, sound = true) {
+    const w = this.world;
+    const lo = w.getBlock(x, y, z), up = w.getBlock(x, y + 1, z);
+    if (!(lo > 0 && isDoor(lo))) return;
+    const s = doorState(lo);
+    if (s.open === open) return;
+    w.setBlock(x, y, z, doorId(0, open, s.right, s.facing));
+    if (up > 0 && isDoor(up)) w.setBlock(x, y + 1, z, doorId(1, open, s.right, s.facing));
+    void sound;
+    this.audio.play(open ? 'door_open' : 'door_close', { at: { x: x + 0.5, y: y + 0.5, z: z + 0.5 } });
+  }
+  ringBell(x, y, z) {
+    this.audio.play('bell', { at: { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, range: 48 });
+    // 村民听到钟声后回家躲避（Java：钟声触发村民躲藏）
+    for (const e of this.entities) if (e instanceof Mob && e.kind === 'villager' && e.pos.distanceTo(new THREE.Vector3(x, y, z)) < 48) e.hide = 300;
+  }
+  // ---------------- 床 / 睡觉（Java ServerPlayer.startSleepInBed）----------------
+  bedHead(x, y, z, id) {
+    const b = BLOCKS[id]; const d = FACING_DIRS[b.facing];
+    return b.bed.head ? [x, y, z] : [x + d[0], y, z + d[2]];
+  }
+  useBed(x, y, z, id) {
+    const p = this.player, b = BLOCKS[id];
+    const [hx, hy, hz] = this.bedHead(x, y, z, id);
+    const far = (bx, bz) => Math.abs(p.pos.x - bx - 0.5) > 3 || Math.abs(p.pos.y - hy) > 2 || Math.abs(p.pos.z - bz - 0.5) > 3;
+    const d = FACING_DIRS[b.facing];
+    if (far(hx, hz) && far(hx - d[0], hz - d[2])) { this.ui.addMessage('你无法入睡，床太远了', true); return; }
+    const above = this.world.getBlock(hx, hy + 1, hz);
+    if (above > 0 && OPAQUE[above]) { this.ui.addMessage('这张床已被阻挡', true); return; }
+    // 设置重生点
+    const same = p.bedSpawn && p.bedSpawn.x === hx && p.bedSpawn.y === hy && p.bedSpawn.z === hz;
+    p.bedSpawn = { x: hx, y: hy, z: hz };
+    if (!same) this.ui.addMessage('已设置重生点');
+    if (this.skyDarkenNow() < 4) { this.ui.addMessage('你只能在夜间或雷暴中入睡', true); return; }
+    if (p.mode !== 'creative') {
+      for (const e of this.entities) {
+        if (!(e instanceof Mob) || !e.hostile || e.dead) continue;
+        if (Math.abs(e.pos.x - hx - 0.5) <= 8 && Math.abs(e.pos.y - hy) <= 5 && Math.abs(e.pos.z - hz - 0.5) <= 8) { this.ui.addMessage('你现在不能休息，周围有怪物在游荡', true); return; }
+      }
+    }
+    // 开始睡觉
+    p.sleeping = true; p.sleepTimer = 0; p.bedPos = { x: hx, y: hy, z: hz, facing: b.facing };
+    p.usingItem = false; p.usingBow = false; p.sprinting = false;
+    p.pos.set(hx + 0.5, hy + 0.5625, hz + 0.5); p.prevPos.copy(p.pos); p.vel.set(0, 0, 0);
+    p.yaw = Math.atan2(d[0], d[2]); p.pitch = 0;
+    this.unlock();
+    this.ui.showSleep(true);
+  }
+  wakeUp(skipMsg) {
+    const p = this.player;
+    if (!p.sleeping) return;
+    p.sleeping = false; p.sleepTimer = 0;
+    const bp = p.bedPos; p.bedPos = null;
+    if (bp) { const s = this.standUpSpot(bp.x, bp.y, bp.z); p.pos.set(s.x, s.y, s.z); p.prevPos.copy(p.pos); }
+    this.ui.showSleep(false);
+    void skipMsg;
+    if (this.inWorld && !this.paused && !this.ui.isOpen()) this.lock();
+  }
+  // Java BedBlock.findStandUpPosition（简化）：床周围可站立的位置
+  standUpSpot(hx, hy, hz) {
+    const w = this.world;
+    const ok = (x, y, z) => { const g = w.getBlock(x, y - 1, z), a = w.getBlock(x, y, z), b = w.getBlock(x, y + 1, z); return g > 0 && SOLID[g] && !(a > 0 && SOLID[a]) && !(b > 0 && SOLID[b]) && !isLiquid(a); };
+    for (let r = 1; r <= 2; r++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) for (const dy of [0, 1, -1]) {
+      if (ok(hx + dx, hy + dy, hz + dz)) return { x: hx + dx + 0.5, y: hy + dy, z: hz + dz + 0.5 };
+    }
+    return { x: hx + 0.5, y: hy + 0.5625, z: hz + 0.5 };
+  }
+  sleepTick() {
+    const p = this.player;
+    if (!p.sleeping) return;
+    const bp = p.bedPos;
+    if (!bp || !isBed(this.world.getBlock(bp.x, bp.y, bp.z))) { this.wakeUp(); return; }
+    if (p.sleepTimer >= 100) {
+      // 所有玩家都在睡觉 → 跳到第二天早上，并清除降雨 / 雷暴
+      const l = this.time + 24000; this.time = l - (l % 24000);
+      if (this.weather.raining || this.weather.thundering) { const W = this.weather; W.rainTime = 0; W.raining = false; W.thunderTime = 0; W.thundering = false; }
+      this.wakeUp();
+    }
+  }
+
+  // ---------------- 爆炸（Java Explosion：16³ 外壳射线 + 方块爆炸抗性）----------------
+  explode(x, y, z, power, source) {
+    const w = this.world;
+    const blow = new Map();
+    for (let j = 0; j < 16; j++) for (let k = 0; k < 16; k++) for (let l = 0; l < 16; l++) {
+      if (j !== 0 && j !== 15 && k !== 0 && k !== 15 && l !== 0 && l !== 15) continue;
+      let dx = j / 15 * 2 - 1, dy = k / 15 * 2 - 1, dz = l / 15 * 2 - 1;
+      const L = Math.hypot(dx, dy, dz); dx /= L; dy /= L; dz /= L;
+      let f = power * (0.7 + Math.random() * 0.6);
+      let px = x, py = y, pz = z;
+      for (; f > 0; f -= 0.22500001) {
+        const bx = Math.floor(px), by = Math.floor(py), bz = Math.floor(pz);
+        if (by < 0 || by >= HEIGHT) break;
+        const id = w.getBlock(bx, by, bz);
+        if (id < 0) break;
+        if (id > 0) f -= ((BLOCKS[id].resistance ?? BLOCKS[id].hardness) + 0.3) * 0.3;
+        if (f > 0 && id > 0) blow.set(bx + ',' + by + ',' + bz, [bx, by, bz, id]);
+        px += dx * 0.3; py += dy * 0.3; pz += dz * 0.3;
+      }
+    }
+    // 实体伤害与击退
+    const f2 = power * 2;
+    const victims = [this.player, ...this.entities.filter((e) => (e instanceof Mob || e instanceof ItemEntity) && !e.dead && !e.removed && e !== source)];
+    for (const e of victims) {
+      if (e === this.player && (e.dead || e.mode === 'spectator')) continue;
+      const d12 = Math.hypot(e.pos.x - x, e.pos.y - y, e.pos.z - z) / f2;
+      if (d12 > 1) continue;
+      let d5 = e.pos.x - x, d7 = (e.eyeHeight ? e.pos.y + e.eyeHeight() : e.pos.y) - y, d9 = e.pos.z - z;
+      const d13 = Math.hypot(d5, d7, d9);
+      if (d13 === 0) continue;
+      d5 /= d13; d7 /= d13; d9 /= d13;
+      const seen = this.seenPercent(x, y, z, e);
+      const d10 = (1 - d12) * seen;
+      if (e instanceof ItemEntity) { if (d10 > 0) e.removed = true; continue; }
+      const dmg = Math.floor((d10 * d10 + d10) / 2 * 7 * f2 + 1);
+      e.kbFrom = null;
+      e.hurt(dmg, 'explosion', source);
+      if (e.mode !== 'creative' || !e.flying) { e.vel.x += d5 * d10; e.vel.y += d7 * d10; e.vel.z += d9 * d10; }
+    }
+    // 破坏方块（掉落概率 1/威力）
+    for (const [bx, by, bz, id] of blow.values()) {
+      const b = BLOCKS[id];
+      if (b.liquid) continue;
+      if (Math.random() < 1 / power) this.dropBlockItems(bx, by, bz, id, null);
+      else this.dropTileContents(bx, by, bz);
+      w.setBlock(bx, by, bz, 0);
+    }
+    this.weatherR && this.weatherR.invalidate();
+    this.particles.explosion(x, y + 0.5, z, power);
+    this.audio.play('explode', { at: { x, y, z }, range: 64 });
+    // 爆炸摇晃
+    this.shake = Math.max(this.shake || 0, 10);
+  }
+  // Java Explosion.getSeenPercent
+  seenPercent(x, y, z, e) {
+    const bb = entityBox(e);
+    const d0 = 1 / ((bb[3] - bb[0]) * 2 + 1), d1 = 1 / ((bb[4] - bb[1]) * 2 + 1), d2 = 1 / ((bb[5] - bb[2]) * 2 + 1);
+    const d3 = (1 - Math.floor(1 / d0) * d0) / 2, d4 = (1 - Math.floor(1 / d2) * d2) / 2;
+    let i = 0, j = 0;
+    for (let a = 0; a <= 1; a += d0) for (let b = 0; b <= 1; b += d1) for (let c = 0; c <= 1; c += d2) {
+      const px = bb[0] + (bb[3] - bb[0]) * a + d3, py = bb[1] + (bb[4] - bb[1]) * b, pz = bb[2] + (bb[5] - bb[2]) * c + d4;
+      const dx = x - px, dy = y - py, dz = z - pz, L = Math.hypot(dx, dy, dz);
+      // 与 Java ClipContext 一样把终点向内收缩一点，避免贴着地面顶面的射线被误判为遮挡
+      if (L < 1e-3 || !raycastBlocks(this.world, px, py, pz, dx, dy, dz, L - 1e-3, 'collide')) i++;
+      j++;
+    }
+    return j ? i / j : 0;
+  }
+
+  // ---------------- 天气（Java ServerLevel.advanceWeatherCycle）----------------
+  newWeather() { return { clearTime: 0, rainTime: 0, thunderTime: 0, raining: false, thundering: false, rain: 0, thunder: 0, prevRain: 0, prevThunder: 0 }; }
+  weatherTick() {
+    const W = this.weather;
+    if (W.clearTime > 0) {
+      W.clearTime--;
+      W.thunderTime = W.thundering ? 0 : 1; W.rainTime = W.raining ? 0 : 1;
+      W.thundering = false; W.raining = false;
+    } else {
+      if (W.thunderTime > 0) { if (--W.thunderTime === 0) W.thundering = !W.thundering; }
+      else W.thunderTime = W.thundering ? uniform(...THUNDER_DURATION) : uniform(...THUNDER_DELAY);
+      if (W.rainTime > 0) { if (--W.rainTime === 0) W.raining = !W.raining; }
+      else W.rainTime = W.raining ? uniform(...RAIN_DURATION) : uniform(...RAIN_DELAY);
+    }
+    W.prevRain = W.rain; W.prevThunder = W.thunder;
+    W.rain = Math.max(0, Math.min(1, W.rain + (W.raining ? 0.01 : -0.01)));
+    W.thunder = Math.max(0, Math.min(1, W.thunder + (W.thundering ? 0.01 : -0.01)));
+    // 闪电：每个已加载区块每刻 1/100000 概率（Java ServerLevel.tickChunk）
+    if (W.raining && W.thundering && W.thunder * W.rain > 0) {
+      for (const c of this.world.chunks.values()) {
+        if (!c.blocks || Math.random() >= 1 / 100000) continue;
+        const x = c.cx * 16 + Math.floor(Math.random() * 16), z = c.cz * 16 + Math.floor(Math.random() * 16);
+        const y = this.world.topY(x, z) + 1;
+        if (this.isRainingAt(x, y, z)) this.strikeLightning(x + 0.5, y, z + 0.5);
+      }
+    }
+    if (this.skyFlash > 0) this.skyFlash--;
+    // 闪电实体寿命
+    for (const b of this.bolts) {
+      b.life--;
+      if (b.life < 0) { if (b.flashes > 0) { b.flashes--; b.life = 1; b.mesh.visible = true; this.skyFlash = 2; } else { this.scene.remove(b.mesh); b.dead = true; } }
+      else b.mesh.visible = b.life >= 0;
+    }
+    this.bolts = this.bolts.filter((b) => !b.dead);
+  }
+  rainLevel(a = 1) { const W = this.weather; return W.prevRain + (W.rain - W.prevRain) * a; }
+  thunderLevel(a = 1) { const W = this.weather; return (W.prevThunder + (W.thunder - W.prevThunder) * a) * this.rainLevel(a); }
+  // 降水类型：null（干旱 / 无）| 'rain' | 'snow'
+  precipAt(x, z, y) {
+    const bi = this.world.biomeAt(x, z);
+    if (bi === BIOME.DESERT) return null;
+    if (bi === BIOME.SNOWY) return 'snow';
+    if (bi === BIOME.MOUNTAINS && (y ?? this.world.topY(x, z)) > 95) return 'snow';
+    return 'rain';
+  }
+  // Java Level.isRainingAt
+  isRainingAt(x, y, z) {
+    if (!this.weather || this.rainLevel() <= 0.2) return false;
+    if (!this.world.isLoaded(x, z)) return false;
+    if (y < this.world.topY(x, z) + 1) return false;
+    return this.precipAt(x, z, y) === 'rain';
+  }
+  // Java Level.updateSkyBrightness 中的 skyDarken
+  skyDarkenNow() {
+    const t = this.time % 24000;
+    const f = t / 24000 - 0.25; const fr = f - Math.floor(f);
+    const c = fr + ((1 - (Math.cos(fr * Math.PI) + 1) / 2) - fr) / 3;
+    const d0 = 1 - this.rainLevel() * 5 / 16, d1 = 1 - this.thunderLevel() * 5 / 16;
+    const d2 = 0.5 + 2 * Math.max(-0.25, Math.min(0.25, Math.cos(c * Math.PI * 2)));
+    return Math.floor((1 - d2 * d0 * d1) * 11);
+  }
+  setWeather(kind, dur) {
+    const W = this.weather;
+    if (kind === 'clear') { W.clearTime = dur ?? uniform(...CLEAR_DURATION); W.rainTime = 0; W.thunderTime = 0; W.raining = false; W.thundering = false; }
+    else if (kind === 'rain') { const d = dur ?? uniform(...RAIN_DURATION); W.clearTime = 0; W.rainTime = d; W.thunderTime = d; W.raining = true; W.thundering = false; }
+    else { const d = dur ?? uniform(...THUNDER_DURATION); W.clearTime = 0; W.rainTime = d; W.thunderTime = d; W.raining = true; W.thundering = true; }
+  }
+  // Java LightningBolt：5 点伤害、点燃、苦力怕变为闪电苦力怕
+  strikeLightning(x, y, z) {
+    const mesh = createLightningMesh(x, y, z, (Math.random() * 1e9) | 0);
+    this.scene.add(mesh);
+    this.bolts.push({ mesh, life: 2, flashes: uniform(1, 3) });
+    this.skyFlash = 2;
+    const p = this.player;
+    const dist = Math.hypot(p.pos.x - x, p.pos.z - z);
+    this.audio.play('thunder', { vol: Math.max(0.35, 1 - dist / 200) });
+    if (dist < 32) this.audio.play('explode', { vol: 0.5 * (1 - dist / 32) });
+    for (const e of [p, ...this.entities.filter((m) => m instanceof Mob && !m.dead)]) {
+      if (Math.abs(e.pos.x - x) < 3 && Math.abs(e.pos.z - z) < 3 && e.pos.y > y - 3 && e.pos.y < y + 6 + 3) {
+        if (e instanceof Mob && e.kind === 'creeper') e.charged = true;
+        e.hurt(5, 'lightning', null);
+        if (e.burning !== undefined) e.burning = 160;
+      }
+    }
+    for (const e of this.entities) if (e instanceof ItemEntity && Math.abs(e.pos.x - x) < 3 && Math.abs(e.pos.z - z) < 3 && Math.abs(e.pos.y - y) < 6) e.removed = true;
+  }
+  livingEntities() { const out = this.entities.filter((e) => e instanceof Mob); if (!this.player.dead) out.push(this.player); return out; }
   openContainer(x, y, z, b) {
     const k = x + ',' + y + ',' + z;
     this.unlock();
@@ -718,13 +1158,32 @@ class Game {
   }
   addEntity(e) { this.entities.push(e); if (e.object) this.scene.add(e.object); }
   swingMob(m) { m.swingT = 0.6; }
-  onChunkLoaded() {}
+  // 村庄中心区块载入时生成村民（每张床一位）
+  onChunkLoaded(c) {
+    if (!this.world || !this.world.gen) return;
+    const vs = villagesForChunk(this.world.gen, c.cx, c.cz);
+    this.villagerCount = this.villagerCount || new Map();
+    for (const v of vs) {
+      if (Math.floor(v.x / 16) !== c.cx || Math.floor(v.z / 16) !== c.cz) continue;
+      const have = this.villagerCount.get(v.id) || 0;
+      const want = Math.max(2, v.beds.length);
+      for (let i = have; i < want; i++) {
+        const home = v.beds[i % Math.max(1, v.beds.length)] || null;
+        const sx = v.bell.x + 1.5 + Math.random() * 2, sz = v.bell.z + (Math.random() - 0.5) * 4;
+        const m = new Mob(this, 'villager', sx, v.bell.y + 1, sz, { home, village: v, desert: v.desert });
+        this.addEntity(m);
+      }
+      this.villagerCount.set(v.id, Math.max(have, want));
+      if (!this.villageChickens) this.villageChickens = new Set();
+      if (!this.villageChickens.has(v.id)) { this.villageChickens.add(v.id); this.trySpawnPassive(v.x + 8, v.z + 8); }
+    }
+  }
   onChunkUnloaded(c) {
     for (const e of this.entities) {
       if ((Math.floor(e.pos.x) >> 4) === c.cx && (Math.floor(e.pos.z) >> 4) === c.cz) e.removed = true;
     }
   }
-  onPlayerHurt() { this.audio.play('hurt'); }
+  onPlayerHurt() { this.audio.play('hurt'); if (this.player.sleeping) this.wakeUp(); }
   onPlayerDeath(source) {
     const p = this.player;
     if (p.mode === 'survival') {
@@ -734,15 +1193,29 @@ class Game {
     if (this.ui.isOpen()) this.ui.close(true);
     this.ui.closeChat();
     this.unlock();
-    this.ui.showDeath('玩家' + (DEATH_MSG[source] || '死了'));
-    this.ui.addMessage('玩家' + (DEATH_MSG[source] || '死了'));
+    let msg = DEATH_MSG[source] || '死了';
+    const att = p.lastAttacker && (p.lastAttacker.shooter || p.lastAttacker);
+    const an = att && att.def ? att.def.name : null;
+    if (an && source === 'mob') msg = `被${an}杀死了`;
+    else if (an && source === 'arrow') msg = `被${an}射杀`;
+    else if (an && source === 'explosion') msg = `被${an}炸死了`;
+    if (p.sleeping) this.wakeUp();
+    this.ui.showDeath('玩家' + msg);
+    this.ui.addMessage('玩家' + msg);
   }
   respawn() {
     const p = this.player;
     p.reset();
     const sx = Math.floor(p.spawn.x), sz = Math.floor(p.spawn.z);
     let x = p.spawn.x, y = p.spawn.y, z = p.spawn.z;
-    if (this.world.isLoaded(sx, sz)) { const s = this.safeSpot(sx, sz); x = s.x + 0.5; y = s.y; z = s.z + 0.5; }
+    let bedOk = false;
+    if (p.bedSpawn) {
+      const bs = p.bedSpawn;
+      if (!this.world.isLoaded(bs.x, bs.z)) { x = bs.x + 0.5; y = bs.y + 0.6; z = bs.z + 0.5; bedOk = true; }
+      else if (isBed(this.world.getBlock(bs.x, bs.y, bs.z))) { const s = this.standUpSpot(bs.x, bs.y, bs.z); x = s.x; y = s.y; z = s.z; bedOk = true; }
+      else { p.bedSpawn = null; this.ui.addMessage('你的床或已充能的重生锚不存在或已被阻挡'); }
+    }
+    if (!bedOk && this.world.isLoaded(sx, sz)) { const s = this.safeSpot(sx, sz); x = s.x + 0.5; y = s.y; z = s.z + 0.5; }
     p.pos.set(x, y, z); p.prevPos.copy(p.pos);
     this.paused = false;
     this.lock();
@@ -799,12 +1272,31 @@ class Game {
         case 'setworldspawn': case 'spawnpoint': p.spawn = { x: p.pos.x, y: p.pos.y, z: p.pos.z }; this.ui.addMessage('已设置出生点'); break;
         case 'summon': {
           const kind = (args[0] || '').replace('minecraft:', '');
-          if (!['pig', 'cow', 'sheep', 'zombie'].includes(kind)) throw new Error('可召唤：pig, cow, sheep, zombie');
           const d = this.lookDir();
-          this.addEntity(new Mob(this, kind, p.pos.x + d.x * 3, p.pos.y + 0.5, p.pos.z + d.z * 3)); break;
+          const hasPos = args.length >= 4;
+          const x = hasPos ? num(args[1], p.pos.x) : p.pos.x + d.x * 3, y = hasPos ? num(args[2], p.pos.y) : p.pos.y + 0.5, z = hasPos ? num(args[3], p.pos.z) : p.pos.z + d.z * 3;
+          if (kind === 'lightning_bolt') { this.strikeLightning(x, y, z); this.ui.addMessage('已召唤新的闪电束'); break; }
+          if (!MOB_DEFS[kind]) throw new Error('可召唤：' + Object.keys(MOB_DEFS).join(', ') + ', lightning_bolt');
+          const m = new Mob(this, kind, x, y, z);
+          if (kind === 'villager') { const v = nearestVillage(this.world.gen, x, z, 3); if (v && Math.hypot(v.x - x, v.z - z) < 80) { m.village = v; m.home = v.beds[Math.floor(Math.random() * v.beds.length)] || null; } }
+          this.addEntity(m);
+          this.ui.addMessage('已召唤新的' + MOB_DEFS[kind].name); break;
+        }
+        case 'weather': {
+          const k = args[0];
+          if (!['clear', 'rain', 'thunder'].includes(k)) throw new Error('用法：/weather clear|rain|thunder [持续时间(秒)]');
+          const dur = args[1] ? Math.max(1, Number(args[1]) || 0) * 20 : undefined;
+          this.setWeather(k, dur);
+          this.ui.addMessage({ clear: '天气已设为晴天', rain: '天气已设为雨天', thunder: '天气已设为雷暴' }[k]); break;
+        }
+        case 'locate': {
+          if ((args[0] || '').replace('minecraft:', '') !== 'village') throw new Error('用法：/locate village');
+          const v = nearestVillage(this.world.gen, p.pos.x, p.pos.z, 8);
+          if (!v) throw new Error('附近找不到村庄');
+          this.ui.addMessage(`最近的村庄位于 [${v.x}, ~, ${v.z}]（距离 ${Math.round(Math.hypot(v.x - p.pos.x, v.z - p.pos.z))} 格）`); break;
         }
         case 'clear': p.inventory.clear(); this.ui.addMessage('已清空物品栏'); break;
-        case 'help': this.ui.addMessage('命令：/gamemode, /time set, /tp, /give, /summon, /seed, /kill, /spawn, /spawnpoint, /clear'); break;
+        case 'help': this.ui.addMessage('命令：/gamemode, /time set, /weather clear|rain|thunder, /tp, /give, /summon <生物|lightning_bolt>, /locate village, /seed, /kill, /spawn, /spawnpoint, /clear'); break;
         default: throw new Error('未知的命令：' + cmd + '，输入 /help 查看帮助');
       }
     } catch (e) { this.ui.addMessage('§ ' + e.message); }
@@ -823,8 +1315,9 @@ class Game {
     const y = w.topSolidY(x, z);
     if (y < 0 || w.getBlock(x, y, z) !== B.grass_block) return false;
     if (w.getBlock(x, y + 1, z) !== 0 && !(BLOCKS[w.getBlock(x, y + 1, z)]?.replaceable && !isLiquid(w.getBlock(x, y + 1, z)))) return false;
-    const kinds = ['pig', 'cow', 'sheep'];
-    const kind = kinds[Math.floor(Math.random() * 3)];
+    // Java 平原生成权重：羊 12、猪 10、鸡 10、牛 8
+    const r = Math.random() * 40;
+    const kind = r < 12 ? 'sheep' : r < 22 ? 'pig' : r < 32 ? 'chicken' : 'cow';
     const n = 2 + Math.floor(Math.random() * 3);
     for (let i = 0; i < n; i++) {
       const ox = x + Math.floor((Math.random() - 0.5) * 6), oz = z + Math.floor((Math.random() - 0.5) * 6);
@@ -859,11 +1352,20 @@ class Game {
       const y = Math.random() < 0.5 ? top + 1 : 5 + Math.floor(Math.random() * Math.max(1, top - 5));
       const below = w.getBlock(bx, y - 1, bz), a = w.getBlock(bx, y, bz), a2 = w.getBlock(bx, y + 1, bz);
       if (!(below > 0 && OPAQUE[below]) || a !== 0 || a2 !== 0) return;
+      // Java Monster.isDarkEnoughToSpawn（雷暴时按 skyDarken = 10 计算）
       const l = w.lightAt(bx, y, bz);
-      const eff = Math.max(l.block, l.sky - Math.round(this.darken * 15));
-      if (eff > 7 || l.block > 0) return;
+      if (l.sky > Math.floor(Math.random() * 32)) return;
+      if (l.block > 0) return;
+      const darken = this.weather.thundering ? 10 : this.skyDarkenNow();
+      const eff = Math.max(l.block, l.sky - darken);
+      if (eff > Math.floor(Math.random() * 8)) return;
       if (Math.hypot(bx - p.pos.x, y - p.pos.y, bz - p.pos.z) < 24) return;
-      this.addEntity(new Mob(this, 'zombie', bx + 0.5, y, bz + 0.5));
+      // Java 主世界怪物权重：僵尸 95、骷髅 100、苦力怕 100
+      const r = Math.random() * 295;
+      const kind = r < 95 ? 'zombie' : r < 195 ? 'skeleton' : 'creeper';
+      const m = new Mob(this, kind, bx + 0.5, y, bz + 0.5);
+      if (boxCollides(w, entityBox(m))) return;
+      this.addEntity(m);
     }
   }
 
@@ -871,6 +1373,9 @@ class Game {
   tick() {
     const p = this.player, w = this.world;
     this.time++;
+    this.weatherTick();
+    this.sleepTick();
+    this.audio.listener = { x: p.pos.x, y: p.pos.y + p.eyeHeight(), z: p.pos.z };
     // 天空（tick 中更新亮度，供逻辑使用）
     const prevMode = p.mode;
     p.tick(this.input());
@@ -892,6 +1397,13 @@ class Game {
           if (!left) e.removed = true; else e.stack.count = left;
         }
       }
+      // 拾取插在地上的箭
+      if (e instanceof Arrow && e.inGround && e.shake <= 0 && !p.dead && !e.removed && (e.pickup || p.mode === 'creative')) {
+        const pb = entityBox(p);
+        if (e.pos.x > pb[0] - 1 && e.pos.x < pb[3] + 1 && e.pos.y > pb[1] - 0.5 && e.pos.y < pb[4] + 0.5 && e.pos.z > pb[2] - 1 && e.pos.z < pb[5] + 1) {
+          if (!e.pickup || p.mode === 'creative' || !p.inventory.add({ id: I.arrow, count: 1, dmg: 0 })) { e.removed = true; this.audio.play('pop', { vol: 0.6 }); }
+        }
+      }
       // 掉落物合并
       if (e instanceof ItemEntity && !e.removed && e.age % 10 === 0) {
         for (const o of this.entities) {
@@ -906,7 +1418,21 @@ class Game {
       const dx = e.pos.x - p.pos.x, dz = e.pos.z - p.pos.z, d = Math.hypot(dx, dz), min = (e.width + p.width) / 2;
       if (d < min && d > 1e-4 && Math.abs(e.pos.y - p.pos.y) < 1.8) { const k = (min - d) * 0.05 / d; e.vel.x += dx * k * 4; e.vel.z += dz * k * 4; p.vel.x -= dx * k; p.vel.z -= dz * k; }
     }
-    this.entities = this.entities.filter((e) => { if (e.removed && e.object) this.scene.remove(e.object); return !e.removed; });
+    this.entities = this.entities.filter((e) => {
+      if (e.removed && e.object) this.scene.remove(e.object);
+      if (e.removed && e.kind === 'villager' && e.village && this.villagerCount && !e.dead) this.villagerCount.set(e.village.id, Math.max(0, (this.villagerCount.get(e.village.id) || 1) - 1));
+      return !e.removed;
+    });
+    // 雨滴溅落粒子
+    const rl = this.rainLevel();
+    if (rl > 0.2) {
+      for (let i = 0; i < Math.round(rl * 6); i++) {
+        const x = Math.floor(p.pos.x + (Math.random() - 0.5) * 20), z = Math.floor(p.pos.z + (Math.random() - 0.5) * 20);
+        if (!w.isLoaded(x, z) || this.precipAt(x, z) !== 'rain') continue;
+        const y = w.topY(x, z);
+        if (y > 0 && Math.abs(y - p.pos.y) < 16) this.particles.hit(x, y, z, [0, 1, 0], FACE_TILES[120 * 6]);
+      }
+    }
     this.spawnTick();
     // 方块刻 & 随机刻
     w.processTicks();
@@ -956,6 +1482,7 @@ class Game {
     this.render(alpha, dt);
     this.audio.updateMusic(dt);
     this.ui.updateHUD();
+    if (p.sleeping) this.ui.setSleepFade(Math.min(1, (p.sleepTimer + Math.min(1, this.acc / TICK)) / 100));
     if (this.showDebug && (this.frames % 10 === 0)) this.updateDebug();
   }
   render(alpha, dt) {
@@ -963,11 +1490,18 @@ class Game {
     const pos = p.renderPos(alpha, new THREE.Vector3());
     // 潜行时视线高度平滑
     p.renderEye = p.renderEye === undefined ? p.eyeHeight() : p.renderEye + (p.eyeHeight() - p.renderEye) * Math.min(1, dt * 15);
-    const eye = new THREE.Vector3(pos.x, pos.y + p.renderEye, pos.z);
+    const eye = new THREE.Vector3(pos.x, pos.y + (p.sleeping ? 0.2 : p.renderEye), pos.z);
     // 天空
     const ptime = this.time + alpha;
-    this.sky.update(ptime % 24000, eye, this.settings.clouds, p.eyeInWater || p.eyeInLava);
+    const rainL = this.rainLevel(alpha), thunderL = this.thunderLevel(alpha);
+    this.sky.update(ptime % 24000, eye, this.settings.clouds, p.eyeInWater || p.eyeInLava, rainL, thunderL, this.skyFlash > 0 ? this.skyFlash - alpha : 0);
     this.daylight = this.sky.daylight; this.darken = this.sky.darken;
+    this.weatherR.update(w, eye, rainL, ptime, this.darken, this.settings.gamma / 100, (x, z) => this.precipAt(x, z));
+    {
+      const pc = this.precipAt(Math.floor(eye.x), Math.floor(eye.z));
+      const indoor = eye.y < w.topY(Math.floor(eye.x), Math.floor(eye.z)) + 1;
+      this.audio.setRain(pc === 'rain' ? rainL : 0, indoor, pc !== 'rain');
+    }
     // 视角
     cam.rotation.set(p.pitch, p.yaw, 0);
     cam.position.copy(eye);
@@ -1036,9 +1570,11 @@ class Game {
     r.render(this.skyScene, cam);
     r.render(this.scene, cam);
     // 第一人称手
-    if (this.perspective === 0 && !this.hudHidden && !p.dead && !this.ui.hideHand) {
+    if (this.perspective === 0 && !this.hudHidden && !p.dead && !this.ui.hideHand && !p.sleeping) {
       const h = p.inventory.held();
-      this.hand.setItem(h ? h.id : 0);
+      const bowT = p.usingItem && p.usingBow ? p.useTicks + alpha : 0;
+      const pull = bowT / 20;
+      this.hand.setItem(h ? h.id : 0, bowT > 0 ? (pull >= 0.9 ? 'item_bow_pulling_2' : pull >= 0.65 ? 'item_bow_pulling_1' : 'item_bow_pulling_0') : '');
       const swing = p.swinging ? Math.min(1, (Math.max(0, p.swingTicks) + alpha) / 6) : 0;
       const l = w.lightAt(Math.floor(eye.x), Math.floor(eye.y), Math.floor(eye.z));
       const br = brightness(l.sky, l.block, this.darken, this.settings.gamma / 100);
@@ -1048,7 +1584,7 @@ class Game {
         const dw = p.distWalked - p.prevDistWalked, f1 = -(p.distWalked + dw * alpha), f2 = p.prevBob + (p.bob - p.prevBob) * alpha;
         hb.makeTranslation(Math.sin(f1 * Math.PI) * f2 * 0.5, -Math.abs(Math.cos(f1 * Math.PI) * f2), 0);
       }
-      this.hand.update(cam.aspect, alpha, swing, br, eating, hb);
+      this.hand.update(cam.aspect, alpha, swing, br, p.usingBow ? 0 : eating, hb, bowT);
       r.clearDepth();
       r.render(this.hand.scene, this.hand.camera);
     }
@@ -1095,7 +1631,7 @@ class Game {
       t && !t.entity ? `${BLOCKS[t.id].key}（${BLOCKS[t.id].name}）` : t && t.entity ? `目标实体: ${t.entity.def.name}` : '',
     ]);
   }
-  playerPreviewCanvas() { return previewCanvas(); }
+  playerPreviewCanvas() { return previewCanvas(() => this.player.inventory.armor); }
 }
 
 // 启动

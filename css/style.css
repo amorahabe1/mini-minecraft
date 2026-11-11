@@ -132,3 +132,11 @@ canvas#game { display: block; position: fixed; inset: 0; width: 100%; height: 10
 .dlg input { width: 100%; height: calc(var(--s) * 20px); background: #000; border: calc(var(--s) * 1px) solid #a0a0a0; color: #e0e0e0; font: inherit; font-size: calc(var(--s) * 8px); padding: 0 calc(var(--s) * 4px); outline: none; }
 .dlg input:focus { border-color: #fff; }
 .btn.danger:hover:not(:disabled) { background: #8a3333; box-shadow: inset calc(var(--s) * 1px) calc(var(--s) * 1px) 0 #c07070, inset calc(var(--s) * -1px) calc(var(--s) * -2px) 0 #5a2020; color: #ffd0d0; }
+
+/* —— 盔甲 / 动作栏 / 睡觉 —— */
+#armor { position: absolute; display: flex; height: calc(var(--s) * 9px); left: 0; bottom: calc(var(--s) * 10px); }
+#stats #armor img { margin-right: calc(var(--s) * -1px); }
+#actionbar { position: absolute; left: 50%; bottom: calc(var(--s) * 60px); transform: translateX(-50%); font-size: calc(var(--s) * 8px); white-space: nowrap; transition: opacity .5s; opacity: 0; pointer-events: none; }
+#sleepFade { position: fixed; inset: 0; background: #0a0a14; pointer-events: none; z-index: 5; transition: opacity .1s linear; }
+#leaveBed { position: fixed; left: 50%; bottom: 12vh; transform: translateX(-50%); z-index: 20; }
+.slot.armorSlot { background-size: 100% 100%; background-repeat: no-repeat; image-rendering: pixelated; }

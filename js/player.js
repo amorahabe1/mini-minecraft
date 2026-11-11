@@ -1,7 +1,10 @@
 // 玩家：生存属性（生命/饥饿/饱和度/消耗度）、飞行、疾跑、潜行、视角摇晃
 import { Living } from './entities.js';
 import { Inventory, CraftGrid } from './inventory.js';
-import { ITEMS, BLOCKS } from './registry.js';
+import { ITEMS, BLOCKS, armorReduce } from './registry.js';
+
+// 不受盔甲减免的伤害来源（Java DamageTypeTags.BYPASSES_ARMOR）
+const BYPASS_ARMOR = new Set(['fall', 'drown', 'starve', 'suffocate', 'void', 'kill']);
 import { isInLiquidAt } from './physics.js';
 
 export class Player extends Living {
@@ -24,6 +27,23 @@ export class Player extends Living {
     this.pitch = 0; this.yaw = 0;
     this.sneakHeight = 0;
     this.wasInWater = false;
+    this.sleeping = false; this.sleepTimer = 0; this.bedPos = null; this.bedSpawn = null;
+  }
+  // Java LivingEntity.getDamageAfterArmorAbsorb + Inventory.hurtArmor
+  applyArmor(amount, source) {
+    if (BYPASS_ARMOR.has(source)) return amount;
+    const inv = this.inventory;
+    const { armor, toughness } = inv.armorPoints();
+    if (this.mode === 'survival' && amount > 0) {
+      const wear = Math.max(1, Math.floor(amount / 4));
+      for (let i = 0; i < 4; i++) {
+        const s = inv.armor[i]; const d = s && ITEMS.get(s.id);
+        if (!d || !d.armor) continue;
+        s.dmg = (s.dmg || 0) + wear;
+        if (s.dmg >= d.durability) { inv.armor[i] = null; this.game.audio.play('armor_break'); this.game.ui.addMessage(d.name + '损坏了！'); }
+      }
+    }
+    return armor > 0 ? armorReduce(amount, armor, toughness) : amount;
   }
   eyeHeight() { return this.sneaking && !this.flying ? 1.54 : 1.62; }
   get mayFly() { return this.mode === 'creative'; }
@@ -60,6 +80,13 @@ export class Player extends Living {
     this.prevDistWalked = this.distWalked; this.prevBob = this.bob; this.prevFovMod = this.fovMod;
     this.lastAttackTicks++;
     if (this.dead) { this.deathTime++; return; }
+    if (this.sleeping) {
+      this.sleepTimer = Math.min(100, this.sleepTimer + 1);
+      this.vel.set(0, 0, 0); this.sprinting = false;
+      this.baseTick();
+      this.foodTick();
+      return;
+    }
     this.baseTick();
     this.eyeInWater = isInLiquidAt(this.game.world, this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, 'water');
     this.eyeInLava = isInLiquidAt(this.game.world, this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, 'lava');
@@ -109,7 +136,8 @@ export class Player extends Living {
     let f = 1;
     if (this.flying) f *= 1.1;
     f *= ((this.sprinting ? 1.3 : 1) + 1) / 2;
-    if (this.usingItem && this.usingBow) f *= 0.85;
+    // Java AbstractClientPlayer.getFieldOfViewModifier：拉弓时 FOV 缩小
+    if (this.usingItem && this.usingBow) { let k = this.useTicks / 20; k = k > 1 ? 1 : k * k; f *= 1 - k * 0.15; }
     this.fovMod += (f - this.fovMod) * 0.5;
     this.foodTick();
   }
@@ -133,11 +161,12 @@ export class Player extends Living {
   canEat() { return this.mode === 'creative' ? false : this.food < 20; }
   reset() {
     this.health = this.maxHealth; this.food = 20; this.saturation = 5; this.exhaustion = 0; this.airSupply = 300;
+    this.sleeping = false; this.sleepTimer = 0;
     this.dead = false; this.deathTime = 0; this.fallDistance = 0; this.vel.set(0, 0, 0); this.hurtTime = 0; this.flying = false;
   }
   toJSON() {
     return { pos: [this.pos.x, this.pos.y, this.pos.z], yaw: this.yaw, pitch: this.pitch, health: this.health, food: this.food, saturation: this.saturation, exhaustion: this.exhaustion,
-      air: this.airSupply, mode: this.mode, flying: this.flying, inventory: this.inventory.toJSON(), spawn: this.spawn, dead: this.dead };
+      air: this.airSupply, mode: this.mode, flying: this.flying, inventory: this.inventory.toJSON(), spawn: this.spawn, bedSpawn: this.bedSpawn, dead: this.dead };
   }
   load(o) {
     if (!o) return;
@@ -146,6 +175,7 @@ export class Player extends Living {
     this.health = o.health ?? 20; this.food = o.food ?? 20; this.saturation = o.saturation ?? 5; this.exhaustion = o.exhaustion || 0;
     this.airSupply = o.air ?? 300; this.mode = o.mode || 'survival'; this.flying = !!o.flying;
     this.inventory.load(o.inventory); if (o.spawn) this.spawn = o.spawn;
+    this.bedSpawn = o.bedSpawn || null;
     if (this.health <= 0) { this.health = 20; }
   }
 }

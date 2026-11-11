@@ -60,7 +60,13 @@ export class Audio {
   place(m) { if (!this.ctx) return; const [f, q, d, v] = this.mat(m); this.noise(d * 1.2, f * 0.9, q, v * 0.7, 'bandpass', 0.003); }
   play(name, opts = {}) {
     if (!this.ctx) return;
-    const vol = opts.vol ?? 1;
+    let vol = opts.vol ?? 1;
+    if (opts.at && this.listener) {
+      const range = opts.range || 16;
+      const d = Math.hypot(opts.at.x - this.listener.x, opts.at.y - this.listener.y, opts.at.z - this.listener.z);
+      vol *= Math.max(0, 1 - d / range);
+      if (vol <= 0.01) return;
+    }
     switch (name) {
       case 'click': this.tone(1200, 0.05, 0.2 * vol, 'square', 0, 900); break;
       case 'pop': this.tone(600 + Math.random() * 300, 0.08, 0.25 * vol, 'sine', 0, 1400); break;
@@ -86,8 +92,58 @@ export class Audio {
       case 'zombie': this.tone(85, 1.0, 0.3 * vol, 'sawtooth', 0, 70, 0.2); this.noise(1.0, 300, 1, 0.15 * vol, 'lowpass', 0.2); break;
       case 'zombie_hurt': this.tone(120, 0.3, 0.3 * vol, 'sawtooth', 0, 80); break;
       case 'zombie_death': this.tone(100, 0.8, 0.3 * vol, 'sawtooth', 0, 50); break;
+      // —— 新增音效（全部程序合成）——
+      case 'chicken': for (let i = 0; i < 2; i++) this.tone(900 + Math.random() * 200, 0.08, 0.12 * vol, 'square', i * 0.12, 1300); break;
+      case 'chicken_hurt': this.tone(1200, 0.15, 0.18 * vol, 'square', 0, 700); break;
+      case 'chicken_death': this.tone(1000, 0.35, 0.18 * vol, 'square', 0, 300); break;
+      case 'villager': { const f = 180 + Math.random() * 60; this.tone(f, 0.12, 0.22 * vol, 'sawtooth', 0, f * 1.3, 0.02); this.tone(f * 1.2, 0.18, 0.2 * vol, 'sawtooth', 0.13, f * 0.8, 0.02); break; }
+      case 'villager_hurt': this.tone(260, 0.2, 0.25 * vol, 'sawtooth', 0, 160); break;
+      case 'villager_death': this.tone(220, 0.6, 0.25 * vol, 'sawtooth', 0, 90); break;
+      case 'skeleton': for (let i = 0; i < 4; i++) this.noise(0.05, 2400 + Math.random() * 1200, 6, 0.25 * vol, 'bandpass', 0.002, i * 0.07); break;
+      case 'skeleton_hurt': for (let i = 0; i < 3; i++) this.noise(0.06, 1800 + Math.random() * 1500, 5, 0.35 * vol, 'bandpass', 0.002, i * 0.05); break;
+      case 'skeleton_death': for (let i = 0; i < 8; i++) this.noise(0.07, 1500 + Math.random() * 2500, 5, 0.35 * vol, 'bandpass', 0.002, i * 0.06); break;
+      case 'creeper_hurt': this.noise(0.25, 1400, 0.8, 0.35 * vol, 'bandpass', 0.01); break;
+      case 'creeper_death': this.noise(0.5, 1000, 0.8, 0.35 * vol, 'bandpass', 0.01); break;
+      case 'creeper_primed': this.noise(1.4, 5000, 0.6, 0.45 * vol, 'highpass', 0.05); this.noise(1.4, 2500, 1.5, 0.2 * vol, 'bandpass', 0.1); break;
+      case 'explode':
+        this.noise(2.5, 120, 0.7, 1.0 * vol, 'lowpass', 0.005, 0, 0.5);
+        this.noise(1.2, 500, 0.6, 0.7 * vol, 'lowpass', 0.003);
+        this.noise(0.6, 2500, 0.5, 0.35 * vol, 'bandpass', 0.002);
+        this.tone(60, 1.2, 0.5 * vol, 'sine', 0, 30, 0.005);
+        break;
+      case 'thunder':
+        this.noise(0.25, 3000, 0.4, 0.6 * vol, 'highpass', 0.002);
+        for (let i = 0; i < 6; i++) this.noise(2 + Math.random() * 2, 90 + Math.random() * 120, 0.6, (0.9 - i * 0.12) * vol, 'lowpass', 0.05, 0.1 + i * 0.35 + Math.random() * 0.2, 0.4 + Math.random() * 0.3);
+        break;
+      case 'bow_shoot': this.noise(0.18, 1800, 2, 0.35 * vol, 'bandpass', 0.003, 0, 0.8); this.tone(240, 0.12, 0.12 * vol, 'triangle', 0, 120); break;
+      case 'bow_pull': this.noise(0.5, 700, 3, 0.12 * vol, 'bandpass', 0.2); break;
+      case 'arrow_hit': this.noise(0.08, 1300, 3, 0.35 * vol, 'bandpass', 0.001); this.tone(180, 0.1, 0.12 * vol, 'triangle', 0, 120); break;
+      case 'arrow_hit_entity': this.noise(0.08, 900, 1.5, 0.35 * vol, 'bandpass', 0.001); break;
+      case 'door_open': this.noise(0.25, 420, 3, 0.45 * vol, 'bandpass', 0.01); this.tone(160 + Math.random() * 30, 0.2, 0.1 * vol, 'sawtooth', 0, 120, 0.02); break;
+      case 'door_close': this.noise(0.12, 300, 2, 0.6 * vol, 'bandpass', 0.002); this.noise(0.08, 900, 2, 0.3 * vol, 'bandpass', 0.002, 0.03); break;
+      case 'bell': [1, 2.76, 5.4, 8.93].forEach((h, i) => this.tone(690 * h, 3.5 / (i + 1), (0.22 / (i + 1)) * vol, 'sine', 0, null, 0.002)); break;
+      case 'armor_equip': { const m = opts.material || 'iron'; if (m === 'leather') this.noise(0.25, 700, 0.8, 0.35 * vol, 'bandpass', 0.02); else if (m === 'chainmail') for (let i = 0; i < 5; i++) this.noise(0.06, 4000 + Math.random() * 2000, 4, 0.25 * vol, 'bandpass', 0.002, i * 0.04); else { this.tone(m === 'gold' ? 1500 : m === 'diamond' ? 1800 : 1100, 0.3, 0.12 * vol, 'triangle', 0, null, 0.002); this.noise(0.15, 2500, 2, 0.25 * vol, 'bandpass', 0.002); } break; }
+      case 'armor_break': case 'item_break': this.noise(0.2, 2000, 2, 0.4 * vol, 'bandpass', 0.002); this.tone(900, 0.15, 0.15 * vol, 'square', 0, 300); break;
+      case 'hoe': this.noise(0.15, 600, 1, 0.4 * vol, 'lowpass', 0.003); break;
       case 'levelup': [523, 659, 784].forEach((f, i) => this.tone(f, 0.25, 0.15 * vol, 'triangle', i * 0.08)); break;
     }
+  }
+  // 雨声循环：level 0..1，indoor 时更闷
+  setRain(level, indoor, snow) {
+    const c = this.ctx; if (!c) return;
+    if (!this.rain) {
+      const src = c.createBufferSource(); src.buffer = this.noiseBuf; src.loop = true;
+      const f = c.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 2200; f.Q.value = 0.35;
+      const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 9000;
+      const g = c.createGain(); g.gain.value = 0;
+      src.connect(f); f.connect(lp); lp.connect(g); g.connect(this.master); src.start();
+      this.rain = { src, f, lp, g, drip: 0 };
+    }
+    const r = this.rain;
+    const target = snow ? 0 : level * (indoor ? 0.07 : 0.16);
+    r.g.gain.setTargetAtTime(target, c.currentTime, 0.4);
+    r.lp.frequency.setTargetAtTime(indoor ? 900 : 9000, c.currentTime, 0.4);
+    if (!snow && level > 0.2 && Math.random() < level * 0.25) this.noise(0.04, 2500 + Math.random() * 3000, 4, (indoor ? 0.02 : 0.05) * level, 'bandpass', 0.001);
   }
   // 简单的环境音乐：偶尔播放一段柔和的五声音阶钢琴旋律
   updateMusic(dt) {

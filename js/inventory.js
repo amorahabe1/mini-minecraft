@@ -1,11 +1,11 @@
 // 物品栏数据模型、合成网格、熔炉逻辑
-import { ITEMS, maxStack, matchRecipe, SMELTING, FUEL, I } from './registry.js';
+import { ITEMS, maxStack, matchRecipe, SMELTING, FUEL, I, durabilityOf } from './registry.js';
 
 export const cloneStack = (s) => (s ? { id: s.id, count: s.count, dmg: s.dmg || 0 } : null);
 export const sameItem = (a, b) => a && b && a.id === b.id && (a.dmg || 0) === (b.dmg || 0) && maxStack(a.id) > 1;
 
 export class Inventory {
-  constructor() { this.slots = new Array(36).fill(null); this.selected = 0; }
+  constructor() { this.slots = new Array(36).fill(null); this.selected = 0; this.armor = [null, null, null, null]; } // armor: 头盔 胸甲 护腿 靴子
   held() { return this.slots[this.selected]; }
   // 添加物品，返回剩余数量
   add(stack) {
@@ -31,14 +31,21 @@ export class Inventory {
   // 工具耐久，返回是否损坏
   damageHeld(amount = 1) {
     const s = this.held(); if (!s) return false;
-    const d = ITEMS.get(s.id); if (!d || !d.tool) return false;
+    const max = durabilityOf(ITEMS.get(s.id)); if (!max) return false;
     s.dmg = (s.dmg || 0) + amount;
-    if (s.dmg >= d.tool.durability) { this.slots[this.selected] = null; return true; }
+    if (s.dmg >= max) { this.slots[this.selected] = null; return true; }
     return false;
   }
-  toJSON() { return { slots: this.slots, selected: this.selected }; }
-  load(o) { if (!o) return; this.slots = o.slots.map(cloneStack); while (this.slots.length < 36) this.slots.push(null); this.selected = o.selected || 0; }
-  clear() { this.slots.fill(null); }
+  // 查找箭（Java：先副手/主手，再从物品栏起始处找）
+  findArrow() { for (let i = 0; i < 36; i++) { const s = this.slots[i]; if (s && s.id === I.arrow) return i; } return -1; }
+  armorPoints() { let a = 0, t = 0; for (const s of this.armor) { const d = s && ITEMS.get(s.id); if (d && d.armor) { a += d.armor.defense; t += d.armor.toughness; } } return { armor: a, toughness: t }; }
+  toJSON() { return { slots: this.slots, selected: this.selected, armor: this.armor }; }
+  load(o) {
+    if (!o) return;
+    this.slots = o.slots.map(cloneStack); while (this.slots.length < 36) this.slots.push(null); this.selected = o.selected || 0;
+    this.armor = (o.armor || [null, null, null, null]).map(cloneStack); while (this.armor.length < 4) this.armor.push(null);
+  }
+  clear() { this.slots.fill(null); this.armor.fill(null); }
 }
 
 // 合成网格

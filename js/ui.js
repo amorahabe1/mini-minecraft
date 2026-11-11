@@ -1,5 +1,5 @@
 // 界面：HUD、物品栏/合成/熔炉/箱子/创造模式物品栏（MC 点击规则）、菜单、聊天
-import { ITEMS, maxStack, itemName, FUEL, SMELTING, CREATIVE_TABS, I, B, TILES, FACE_TILES } from './registry.js';
+import { ITEMS, maxStack, itemName, FUEL, SMELTING, CREATIVE_TABS, I, B, TILES, FACE_TILES, durabilityOf, ARMOR_SLOTS } from './registry.js';
 import { cloneStack, sameItem } from './inventory.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -33,6 +33,32 @@ function foodIcon(fill, half) {
     }));
   });
 }
+// HUD 护甲图标（胸甲轮廓：满 / 半 / 空）
+const ARMOR_SHAPE = ['##...##', '#a#.#a#', '#aa#aa#', '.#aaa#.', '.#aaa#.', '.#aaa#.', '.#####.'];
+function armorIcon(kind) {
+  return pixelIcon((g) => {
+    ARMOR_SHAPE.forEach((r, y) => [...r].forEach((ch, x) => {
+      let c = null;
+      if (ch === '#') c = '#1e1e1e';
+      else if (ch === 'a') { const on = kind === 'full' || (kind === 'half' && x < 3); c = on ? (y < 2 || x === 1 ? '#f2f2f2' : '#bfc3c8') : '#3c3c3c'; }
+      if (c) { g.fillStyle = c; g.fillRect(x + 1, y + 1, 1, 1); }
+    }));
+  });
+}
+// 物品栏中空盔甲槽的占位轮廓
+const SLOT_SHAPES = [
+  ['..####..', '.#....#.', '#......#', '#..##..#', '##....##', '........'],
+  ['##....##', '#.#..#.#', '#..##..#', '.#....#.', '.#....#.', '.#....#.', '.######.'],
+  ['.######.', '.#....#.', '.#.##.#.', '.#.#.##.', '.#.#.#..', '.###.#..', '.....##.'],
+  ['........', '.##..##.', '.#....#.', '.#....#.', '##....##', '###..###'],
+];
+function slotShape(i) {
+  return pixelIcon((g) => {
+    const sh = SLOT_SHAPES[i], oy = Math.floor((16 - sh.length * 2) / 2);
+    g.fillStyle = 'rgba(55,55,55,0.75)';
+    sh.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '#') g.fillRect(x * 2, oy + y * 2, 2, 2); }));
+  }, 16, 16);
+}
 function bubbleIcon(pop) {
   return pixelIcon((g) => {
     g.fillStyle = '#1e4e9e'; g.fillRect(2, 1, 5, 7); g.fillRect(1, 2, 7, 5);
@@ -55,6 +81,8 @@ export class UI {
     this.icHeart = { full: heartIcon(true, false), half: heartIcon(true, true), empty: heartIcon(false, false) };
     this.icFood = { full: foodIcon(true, false), half: foodIcon(true, true), empty: foodIcon(false, false) };
     this.icBubble = { full: bubbleIcon(false), pop: bubbleIcon(true) };
+    this.icArmor = { full: armorIcon('full'), half: armorIcon('half'), empty: armorIcon('empty') };
+    this.slotShapes = [0, 1, 2, 3].map(slotShape);
     this.cursorEl = el('div', '', document.body); this.cursorEl.id = 'cursorItem';
     this.tooltip = el('div', 'hidden', document.body); this.tooltip.id = 'tooltip';
     document.addEventListener('mousemove', (e) => { this.mx = e.clientX; this.my = e.clientY; this.cursorEl.style.left = e.clientX + 'px'; this.cursorEl.style.top = e.clientY + 'px'; if (!this.tooltip.classList.contains('hidden')) this.placeTooltip(); });
@@ -78,13 +106,15 @@ export class UI {
       <div id="debug" class="hidden"></div><div id="debugR" class="hidden"></div>
       <div id="chat"></div>
       <div id="itemName" class="txt"></div>
-      <div id="stats"><div id="hearts"></div><div id="food"></div><div id="air"></div></div>
+      <div id="stats"><div id="armor"></div><div id="hearts"></div><div id="food"></div><div id="air"></div></div>
+      <div id="actionbar" class="txt"></div>
+      <div id="sleepFade" class="hidden"></div>
       <div id="hotbar"><div id="hotsel"></div></div>`;
     const hb = $('#hotbar');
     this.hotSlots = [];
     for (let i = 0; i < 9; i++) { const s = el('div', 'hs', hb); s.style.left = px(1 + i * 20); this.hotSlots.push(s); }
-    this.heartEls = []; this.foodEls = []; this.airEls = [];
-    for (let i = 0; i < 10; i++) { this.heartEls.push(el('img', '', $('#hearts'))); this.foodEls.push(el('img', '', $('#food'))); this.airEls.push(el('img', '', $('#air'))); }
+    this.heartEls = []; this.foodEls = []; this.airEls = []; this.armorEls = [];
+    for (let i = 0; i < 10; i++) { this.heartEls.push(el('img', '', $('#hearts'))); this.foodEls.push(el('img', '', $('#food'))); this.airEls.push(el('img', '', $('#air'))); this.armorEls.push(el('img', '', $('#armor'))); }
     this.lastHud = {};
   }
   stackHTML(s) {
@@ -92,8 +122,9 @@ export class UI {
     const d = ITEMS.get(s.id);
     let h = `<img class="icon" src="${this.icons.get(s.id) || ''}">`;
     if (s.count > 1) h += `<span class="cnt">${s.count}</span>`;
-    if (d && d.tool && s.dmg > 0) {
-      const f = 1 - s.dmg / d.tool.durability;
+    const maxD = durabilityOf(d);
+    if (maxD && s.dmg > 0) {
+      const f = 1 - s.dmg / maxD;
       const col = `hsl(${Math.round(f * 120)},100%,50%)`;
       h += `<div class="dur"><div style="width:${Math.round(f * 13) / 13 * 100}%;background:${col}"></div></div>`;
     }
@@ -114,7 +145,8 @@ export class UI {
     }
     const survival = p.mode === 'survival';
     if (survival) {
-      const hk = Math.ceil(p.health) + ':' + p.food + ':' + Math.ceil(p.airSupply / 30) + ':' + (p.hurtTime > 0);
+      const ap = inv.armorPoints().armor;
+      const hk = Math.ceil(p.health) + ':' + p.food + ':' + Math.ceil(p.airSupply / 30) + ':' + (p.hurtTime > 0) + ':' + ap;
       if (hk !== this.lastHud.stats) {
         this.lastHud.stats = hk;
         const hp = Math.ceil(p.health);
@@ -126,6 +158,9 @@ export class UI {
           const f = p.food - i * 2;
           this.foodEls[i].src = f >= 2 ? this.icFood.full : f === 1 ? this.icFood.half : this.icFood.empty;
         }
+        // 护甲值（Java Gui.renderArmor：有护甲时显示在生命值上方）
+        $('#armor').style.visibility = ap > 0 ? 'visible' : 'hidden';
+        for (let i = 0; i < 10; i++) { const v = ap - i * 2; this.armorEls[i].src = v >= 2 ? this.icArmor.full : v === 1 ? this.icArmor.half : this.icArmor.empty; }
         const underwater = p.eyeInWater;
         const bubbles = Math.ceil((p.airSupply * 10) / 300);
         for (let i = 0; i < 10; i++) {
@@ -168,7 +203,12 @@ export class UI {
   setHudVisible(v) { this.hud.style.display = v ? '' : 'none'; this.syncChrome(); }
 
   // ---------------- 聊天 ----------------
-  addMessage(text) {
+  addMessage(text, actionbar) {
+    if (actionbar) {
+      const a = $('#actionbar'); a.textContent = text; a.style.opacity = 1;
+      clearTimeout(this.abT); this.abT = setTimeout(() => (a.style.opacity = 0), 3000);
+      return;
+    }
     const c = $('#chat');
     const m = el('div', 'msg txt', c); m.textContent = text;
     while (c.children.length > 10) c.removeChild(c.firstChild);
@@ -259,16 +299,27 @@ export class UI {
   buildInventory(root) {
     const p = this.panel(root, 176, 166);
     const g = this.game;
-    for (let i = 0; i < 4; i++) { const s = this.slot(p, 8, 8 + i * 18, { get: () => null, set: () => {}, disabled: true }); s.classList.add('ph'); s.innerHTML = `<img class="icon" style="opacity:.25" src="${this.armorIcon(i)}">`; }
+    this.armorBindings(p, [[8, 8], [8, 26], [8, 44], [8, 62]]);
     const prev = el('div', 'preview', p); prev.style.left = px(26); prev.style.top = px(8); prev.style.width = px(51); prev.style.height = px(72);
-    prev.appendChild(this.game.playerPreviewCanvas());
+    this.screen.preview = prev.appendChild(this.game.playerPreviewCanvas());
     this.label(p, '合成', 97, 8);
     this.gridBindings(p, g.player.craft2, 98, 18, 154, 28);
     this.screen.bindings[this.screen.bindings.length - 1].el.style.left = px(150); this.screen.bindings[this.screen.bindings.length - 1].el.style.top = px(24);
     const ar = el('div', 'arrow', p); ar.style.left = px(134); ar.style.top = px(28);
     this.invBindings(p, 8, 84);
   }
-  armorIcon(i) { return this.icons.get([I.iron_ingot, I.leather, I.leather, I.leather][i]) || ''; }
+  // 盔甲槽：只接受对应部位的盔甲
+  armorBindings(p, pos) {
+    const inv = this.game.player.inventory;
+    for (let i = 0; i < 4; i++) {
+      const b = { get: () => inv.armor[i], set: (v) => { const old = inv.armor[i]; inv.armor[i] = v; if (v && (!old || old.id !== v.id)) { const d = ITEMS.get(v.id); this.game.audio.play('armor_equip', { material: d.armor.material }); } }, group: 'armor', idx: i,
+        accept: (s) => { const d = ITEMS.get(s.id); return !!(d && d.armor && d.armor.slot === i); } };
+      const sl = this.slot(p, pos[i][0], pos[i][1], b);
+      sl.classList.add('armorSlot');
+      sl.style.backgroundImage = `url(${this.slotShapes[i]})`;
+      sl.title = ARMOR_SLOTS[i].name;
+    }
+  }
   buildCrafting(root) {
     const p = this.panel(root, 176, 166);
     const grid = this.screen.craft3 = new this.game.CraftGrid(3);
@@ -316,7 +367,8 @@ export class UI {
     this.label(p, this.creativeTab === 'inventory' ? '物品栏' : tab.name, 8, 6);
     if (this.creativeTab === 'inventory') {
       const prev = el('div', 'preview', p); prev.style.left = px(73); prev.style.top = px(5); prev.style.width = px(32); prev.style.height = px(43);
-      prev.appendChild(this.game.playerPreviewCanvas());
+      this.screen.preview = prev.appendChild(this.game.playerPreviewCanvas());
+      this.armorBindings(p, [[54, 6], [54, 33], [108, 6], [108, 33]]);
       const inv = this.game.player.inventory;
       for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) { const i = 9 + r * 9 + c; this.slot(p, 9 + c * 18, 54 + r * 18, { get: () => inv.slots[i], set: (v) => (inv.slots[i] = v), group: 'main' }); }
     } else {
@@ -376,9 +428,10 @@ export class UI {
       if (b.disabled || b.trash) continue;
       const s = b.get();
       const k = s ? s.id + ':' + s.count + ':' + (s.dmg || 0) : '';
-      if (b.last !== k) { b.last = k; b.el.innerHTML = this.stackHTML(s); }
+      if (b.last !== k) { b.last = k; b.el.innerHTML = this.stackHTML(s); if (b.group === 'armor') b.el.style.backgroundImage = s ? 'none' : `url(${this.slotShapes[b.idx]})`; }
     }
     this.cursorEl.innerHTML = this.cursor ? this.stackHTML(this.cursor) : '';
+    if (this.screen.preview) { const ak = this.game.player.inventory.armor.map((s) => (s ? s.id : 0)).join(','); if (ak !== this.screen.armorKey) { this.screen.armorKey = ak; this.screen.preview.redraw(); } }
     if (this.screen.type === 'furnace') {
       const te = this.screen.data;
       const f = te.burnMax ? te.burn / te.burnMax : 0;
@@ -394,6 +447,12 @@ export class UI {
     const d = ITEMS.get(s.id);
     let h = `<div>${itemName(s.id)}</div>`;
     if (d && d.tool) h += `<div class="sub">耐久度：${d.tool.durability - (s.dmg || 0)} / ${d.tool.durability}</div><div class="sub" style="color:#5555ff">+${d.tool.damage} 攻击伤害</div>`;
+    if (d && d.armor) {
+      h += `<div class="sub" style="color:#aaa">${['在头部时：', '在身体上时：', '在腿部时：', '在脚部时：'][d.armor.slot]}</div><div class="sub" style="color:#5555ff">+${d.armor.defense} 盔甲值</div>`;
+      if (d.armor.toughness) h += `<div class="sub" style="color:#5555ff">+${d.armor.toughness} 盔甲韧性</div>`;
+      h += `<div class="sub">耐久度：${d.durability - (s.dmg || 0)} / ${d.durability}</div>`;
+    }
+    if (d && d.bow) h += `<div class="sub">耐久度：${d.durability - (s.dmg || 0)} / ${d.durability}</div>`;
     if (d && d.food) h += `<div class="sub">饥饿值 +${d.food[0]}</div>`;
     this.tooltip.innerHTML = h;
     this.tooltip.classList.remove('hidden');
@@ -537,7 +596,11 @@ export class UI {
     const stack = { ...s };
     let targets;
     const t = sc.type;
-    if (b.group === 'grid' || b.group === 'chest' || b.output || b.group === 'furnaceIn' || b.group === 'furnaceFuel') targets = invTargets;
+    const sd = ITEMS.get(s.id);
+    const armorT = sd && sd.armor ? grp('armor').filter((a) => a.idx === sd.armor.slot && !a.get()) : [];
+    if (b.group === 'armor') targets = [...grp('main'), ...grp('hotbar')];
+    else if ((b.group === 'main' || b.group === 'hotbar') && armorT.length && (t === 'inventory' || t === 'creative')) targets = armorT;
+    else if (b.group === 'grid' || b.group === 'chest' || b.output || b.group === 'furnaceIn' || b.group === 'furnaceFuel') targets = invTargets;
     else if (t === 'chest') targets = grp('chest');
     else if (t === 'furnace') {
       if (SMELTING.has(s.id)) targets = grp('furnaceIn');
@@ -744,10 +807,10 @@ export class UI {
     el('div', 'm-h txt', m, '操作说明');
     const k = el('div', 'keys txt', m);
     const rows = [['W A S D', '移动'], ['鼠标', '转动视角'], ['空格', '跳跃 / 游泳上浮 / 飞行上升'], ['双击空格', '切换飞行（创造模式）'], ['左 Shift', '潜行（不会从边缘掉落）/ 飞行下降'],
-      ['左 Ctrl 或 双击 W', '疾跑'], ['鼠标左键（按住）', '挖掘方块 / 攻击'], ['鼠标右键', '放置方块 / 使用物品 / 打开容器 / 进食'], ['鼠标中键', '选取方块'],
+      ['左 Ctrl 或 双击 W', '疾跑'], ['鼠标左键（按住）', '挖掘方块 / 攻击'], ['鼠标右键', '放置方块 / 使用物品 / 打开容器 / 进食 / 开关门 / 睡觉 / 穿戴盔甲'], ['按住右键（弓）', '拉弓，松开射箭（需要箭，创造模式除外）'], ['鼠标中键', '选取方块'],
       ['1 – 9 / 滚轮', '选择快捷栏'], ['E', '打开物品栏'], ['Q / Ctrl+Q', '丢弃物品 / 丢弃整组'], ['T 或 /', '聊天与命令'], ['F1', '隐藏界面'], ['F3', '调试信息'], ['F5', '切换视角'], ['Esc', '暂停菜单'],
       ['物品栏中', '左键拿起/放下，右键拿一半/放一个，Shift+点击快速移动，拖动均分，双击收集'],
-      ['命令', '/gamemode creative|survival, /time set day|night|数值, /tp x y z, /give 物品 数量, /seed, /kill, /spawn']];
+      ['命令', '/gamemode creative|survival, /time set day|night|数值, /weather clear|rain|thunder, /tp x y z, /give 物品 数量, /summon 生物（pig cow sheep chicken zombie skeleton creeper villager lightning_bolt）, /locate village, /seed, /kill, /spawn, /help']];
     for (const [a, b] of rows) { el('b', '', k, a); el('span', '', k, b); }
     const c = el('div', 'm-col', m); c.style.marginTop = px(10);
     this.button(c, '完成', back);
@@ -773,6 +836,15 @@ export class UI {
     this.button(c, '回到标题画面', () => { d.remove(); this.game.saveAndQuit(); });
     this.syncChrome();
   }
+  // 睡觉：屏幕渐暗 + “离开床”按钮
+  showSleep(on) {
+    const f = $('#sleepFade');
+    let b = $('#leaveBed');
+    if (!on) { f.classList.add('hidden'); f.style.opacity = 0; if (b) b.remove(); return; }
+    f.classList.remove('hidden'); f.style.opacity = 0;
+    if (!b) { b = el('div', 'm-col', document.body); b.id = 'leaveBed'; this.button(b, '离开床', () => this.game.wakeUp()); }
+  }
+  setSleepFade(f) { const e = $('#sleepFade'); if (e) e.style.opacity = (f * 0.85).toFixed(3); }
   showLoading(text, prog) {
     let m = $('#menu');
     if (!m || !m.classList.contains('loading') || !m.querySelector('.lt')) { m = this.menu('dirt'); m.classList.add('loading'); el('div', 'txt lt', m); const b = el('div', 'bar', m); el('div', '', b); }

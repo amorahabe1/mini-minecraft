@@ -1,5 +1,5 @@
 // 区块网格化 + 光照计算（在 Worker 中运行）
-import { CHUNK, HEIGHT, OPAQUE, LIGHT_OPACITY, LIGHT_EMIT, SHAPE, RENDER, FACE_TILES, SHAPES, BLOCKS } from './registry.js';
+import { CHUNK, HEIGHT, OPAQUE, LIGHT_OPACITY, LIGHT_EMIT, SHAPE, RENDER, FACE_TILES, SHAPES, BLOCKS, MODELS } from './registry.js';
 import { hash3 } from './noise.js';
 
 const RW = 48; // 3x3 区块区域宽度
@@ -104,6 +104,20 @@ function computeLight(topY) {
     if (e > 0) { blk[i] = e; queue[tail++ & QMASK] = i; }
   }
   propagate(blk, head, tail, topY);
+  // 台阶/楼梯/土径等非完整但遮光的方块：取相邻格最大亮度（Java useShapeForLightOcclusion 的近似）
+  const L2 = RW * RW;
+  for (let y = 0; y <= topY; y++) for (let z = 1; z < RW - 1; z++) for (let x = 1; x < RW - 1; x++) {
+    const i = ri(x, y, z);
+    const id = rb[i];
+    if (SHAPE[id] !== 7 || LIGHT_OPACITY[id] < 15) continue;
+    let s = 0, b = 0;
+    for (const n of [i - 1, i + 1, i - RW, i + RW, i + L2, y > 0 ? i - L2 : i]) {
+      if (n >= RSIZE || OPAQUE[rb[n]]) continue;
+      if (sky[n] > s) s = sky[n]; if (blk[n] > b) b = blk[n];
+    }
+    if (y >= topY) s = 15;
+    sky[i] = Math.max(sky[i], s); blk[i] = Math.max(blk[i], b > 0 ? b : 0);
+  }
 }
 function propagate(arr, head, tail, topY) {
   const L2 = RW * RW;
@@ -254,6 +268,66 @@ export function meshChunk(chunks, cx, cz) {
         ls[k * 4] = sl; ls[k * 4 + 1] = bl; ls[k * 4 + 2] = 255; ls[k * 4 + 3] = t;
       }
       solid.quad(ps, uvs, ls, false);
+    } else if (shape === SHAPES.MODEL) {
+      const boxes = MODELS[id];
+      if (!boxes) continue;
+      const buf = RENDER[id] === 2 ? trans : solid;
+      for (const bx of boxes) {
+        const B6 = bx.b;
+        for (let f = 0; f < 6; f++) {
+          const t = bx.t[f];
+          if (t < 0) continue;
+          const F = FACES[f];
+          const ax = F.axis;
+          const onEdge = F.s > 0 ? B6[ax + 3] >= 1 : B6[ax] <= 0;
+          // 采样格：贴边的面用相邻格，内部的面用本格
+          const sx = onEdge ? x + F.n[0] : x, sy = onEdge ? y + F.n[1] : y, sz = onEdge ? z + F.n[2] : z;
+          if (onEdge) {
+            if (sy < 0) continue;
+            const nb = get(sx, sy, sz);
+            if (OPAQUE[nb]) continue;
+          }
+          let aoSum02 = 0, aoSum13 = 0;
+          for (let k = 0; k < 4; k++) {
+            const V = F.verts[k];
+            // 顶点在盒子上的位置
+            const px = V.p[0] ? B6[3] : B6[0], py = V.p[1] ? B6[4] : B6[1], pz = V.p[2] ? B6[5] : B6[2];
+            const P = [px, py, pz];
+            P[ax] = F.s > 0 ? B6[ax + 3] : B6[ax];
+            ps[k * 3] = lx + P[0]; ps[k * 3 + 1] = y + P[1]; ps[k * 3 + 2] = lz + P[2];
+            // UV：按局部朝向的坐标取纹理子区域（与 Java 模型相同，台阶侧面只取半张纹理）
+            let qx = P[0], qz = P[2];
+            for (let r = 0; r < bx.rot; r++) { const nx2 = qz, nz2 = 1 - qx; qx = nx2; qz = nz2; }
+            let lf = f;
+            if (F.axis !== 1) { for (let r = 0; r < bx.rot; r++) lf = [5, 4, 2, 3, 0, 1][lf]; }
+            const LF = FACES[lf], Q = [qx, P[1], qz];
+            let u, v;
+            if (LF.axis === 0) { u = LF.s > 0 ? 1 - Q[2] : Q[2]; v = Q[1]; }
+            else if (LF.axis === 2) { u = LF.s > 0 ? Q[0] : 1 - Q[0]; v = Q[1]; }
+            else { u = Q[0]; v = LF.s > 0 ? 1 - Q[2] : Q[2]; }
+            tileUV(t, u, v, k);
+            // AO：沿面平面方向检查采样格的邻居（顶点靠哪侧就看哪侧）
+            const b1 = (ax + 1) % 3, c1 = (ax + 2) % 3;
+            const d1 = [0, 0, 0], d2 = [0, 0, 0];
+            d1[b1] = P[b1] > 0.5 ? 1 : -1; d2[c1] = P[c1] > 0.5 ? 1 : -1;
+            const edge1 = P[b1] <= 0 || P[b1] >= 1, edge2 = P[c1] <= 0 || P[c1] >= 1;
+            const s1x = sx + d1[0], s1y = sy + d1[1], s1z = sz + d1[2];
+            const s2x = sx + d2[0], s2y = sy + d2[1], s2z = sz + d2[2];
+            const crx = sx + d1[0] + d2[0], cry = sy + d1[1] + d2[1], crz = sz + d1[2] + d2[2];
+            const o1 = edge1 ? OPAQUE[get(s1x, s1y, s1z)] : 0, o2 = edge2 ? OPAQUE[get(s2x, s2y, s2z)] : 0;
+            const oc = edge1 && edge2 ? OPAQUE[get(crx, cry, crz)] : 0;
+            const ao = o1 && o2 ? 0 : 3 - (o1 + o2 + oc);
+            let sS = skyAt(sx, sy, sz), sB = blkAt(sx, sy, sz), cnt = 1;
+            if (edge1 && !o1) { sS += skyAt(s1x, s1y, s1z); sB += blkAt(s1x, s1y, s1z); cnt++; }
+            if (edge2 && !o2) { sS += skyAt(s2x, s2y, s2z); sB += blkAt(s2x, s2y, s2z); cnt++; }
+            if (edge1 && edge2 && !oc && !(o1 && o2)) { sS += skyAt(crx, cry, crz); sB += blkAt(crx, cry, crz); cnt++; }
+            ls[k * 4] = Math.round((sS / cnt) * 17); ls[k * 4 + 1] = Math.round((sB / cnt) * 17);
+            ls[k * 4 + 2] = Math.round(AO_CURVE[ao] * F.shade * 255); ls[k * 4 + 3] = t;
+            if (k === 0 || k === 2) aoSum02 += ao; else aoSum13 += ao;
+          }
+          buf.quad(ps, uvs, ls, aoSum02 < aoSum13);
+        }
+      }
     } else if (shape === SHAPES.CACTUS) {
       const inset = 1 / 16;
       for (let f = 0; f < 6; f++) {

@@ -1,6 +1,6 @@
 // 渲染：区块着色器、天空、选择框、裂纹、物品模型
 import * as THREE from 'three';
-import { TILES, FACE_TILES, BLOCKS, SHAPE, SHAPES, ITEMS } from './registry.js';
+import { TILES, FACE_TILES, BLOCKS, SHAPE, SHAPES, ITEMS, MODELS, SELECT } from './registry.js';
 import { mulberry32 } from './noise.js';
 
 export function lightCurve(l) { return l / (4 - 3 * l); }
@@ -180,14 +180,17 @@ export class Sky {
     return t;
   }
   // time: 0..24000
-  update(time, camPos, showClouds, underwater) {
+  update(time, camPos, showClouds, underwater, rain = 0, thunder = 0, flash = 0) {
     const f = time / 24000 - 0.25;
     let fr = f - Math.floor(f);
     const celestial = fr + ((1 - (Math.cos(fr * Math.PI) + 1) / 2) - fr) / 3;
     const a = celestial * Math.PI * 2;
     const day = Math.max(0, Math.min(1, Math.cos(a) * 2 + 0.5));
+    // Java Level.updateSkyBrightness：雨 / 雷暴使天空变暗
+    const wd = (1 - rain * 5 / 16) * (1 - thunder * 5 / 16);
     this.daylight = day;
-    this.darken = (1 - day) * 11 / 15;
+    this.skyDarken = Math.floor((1 - day * wd) * 11);
+    this.darken = flash > 0 ? 0 : (1 - day * wd) * 11 / 15;
     // 太阳从东(+X)升起
     this.celestial.rotation.set(0, 0, a);
     this.group.position.copy(camPos);
@@ -204,19 +207,36 @@ export class Sky {
     this.domeMat.uniforms.uHorizon.value.copy(horizon);
     this.domeMat.uniforms.uSunDir.value.copy(sunDir);
     this.domeMat.uniforms.uSunrise.value.set(1.0, 0.55, 0.25, sr * 0.8);
+    // Java ClientLevel.getSkyColor：雨天去饱和，雷暴更暗；闪电时天空发白
+    const weatherTint = (c) => {
+      if (rain > 0) { const lum = (c.r * 0.3 + c.g * 0.59 + c.b * 0.11) * 0.6, k = 1 - rain * 0.75; c.setRGB(c.r * k + lum * (1 - k), c.g * k + lum * (1 - k), c.b * k + lum * (1 - k)); }
+      if (thunder > 0) { const lum = (c.r * 0.3 + c.g * 0.59 + c.b * 0.11) * 0.2, k = 1 - thunder * 0.75; c.setRGB(c.r * k + lum * (1 - k), c.g * k + lum * (1 - k), c.b * k + lum * (1 - k)); }
+      if (flash > 0) { const k = Math.min(1, flash) * 0.45; c.setRGB(c.r * (1 - k) + 0.8 * k, c.g * (1 - k) + 0.8 * k, c.b * (1 - k) + k); }
+      return c;
+    };
+    weatherTint(top); weatherTint(horizon);
+    sr *= 1 - rain;
+    this.domeMat.uniforms.uTop.value.copy(top);
+    this.domeMat.uniforms.uHorizon.value.copy(horizon);
+    this.domeMat.uniforms.uSunrise.value.set(1.0, 0.55, 0.25, sr * 0.8);
     this.fogColor.copy(horizon);
     if (sr > 0) this.fogColor.lerp(new THREE.Color(1.0, 0.6, 0.35), sr * 0.25);
+    // Java FogRenderer：雨天雾色变暗
+    if (rain > 0) { const k = 1 - rain * 0.5; this.fogColor.r *= k; this.fogColor.g *= k; this.fogColor.b *= 1 - rain * 0.4; }
+    if (thunder > 0) this.fogColor.multiplyScalar(1 - thunder * 0.5);
     this.skyColor.copy(top);
-    this.starMat.opacity = Math.max(0, 1 - day * 1.6) * 0.9;
-    this.sun.material.opacity = 1; this.moon.material.opacity = 1;
+    this.starMat.opacity = Math.max(0, 1 - day * 1.6) * 0.9 * (1 - rain);
+    this.sun.material.opacity = 1 - rain; this.moon.material.opacity = 1 - rain;
     // 云
     this.clouds.visible = showClouds && !underwater;
     const cloudScale = 12 * 128; // 每像素 12 格
     this.clouds.position.set(camPos.x, 132, camPos.z);
     this.cloudTex.offset.set((camPos.x + time * 0.05) / cloudScale, -camPos.z / cloudScale);
     this.cloudTex.repeat.set(1536 / cloudScale, 1536 / cloudScale);
-    const cb = 0.15 + day * 0.85;
+    let cb = 0.15 + day * 0.85;
+    cb *= (1 - rain * 0.55) * (1 - thunder * 0.4);
     this.cloudMat.color.setRGB(cb, cb, cb * 1.02);
+    this.cloudMat.opacity = 0.8 + rain * 0.15;
     this.dome.visible = !underwater;
   }
 }
@@ -242,6 +262,19 @@ export class BlockHighlight {
   }
   show(x, y, z, id) {
     const b = BLOCKS[id];
+    this.extra = this.extra || [];
+    for (const e of this.extra) e.visible = false;
+    if (SHAPE[id] === SHAPES.MODEL && SELECT[id] && SELECT[id].length) {
+      const list = SELECT[id];
+      list.forEach((bx, i) => {
+        let o = i === 0 ? this.box : this.extra[i - 1];
+        if (!o) { o = new THREE.LineSegments(this.box.geometry, this.box.material); this.box.parent.add(o); this.extra.push(o); }
+        o.scale.set(bx[3] - bx[0] + 0.004, bx[4] - bx[1] + 0.004, bx[5] - bx[2] + 0.004);
+        o.position.set(x + (bx[0] + bx[3]) / 2, y + (bx[1] + bx[4]) / 2, z + (bx[2] + bx[5]) / 2);
+        o.visible = true;
+      });
+      return;
+    }
     let sx = 1, sy = 1, sz = 1, ox = 0.5, oy = 0.5, oz = 0.5;
     if (b.shape === 'cross') { sx = sz = 0.8; sy = 0.8; oy = 0.4; }
     else if (b.shape === 'torch') { sx = sz = 0.3; sy = 0.62; oy = 0.31; }
@@ -251,7 +284,7 @@ export class BlockHighlight {
     this.box.position.set(x + ox, y + oy, z + oz);
     this.box.visible = true;
   }
-  hide() { this.box.visible = false; this.crack.visible = false; }
+  hide() { this.box.visible = false; this.crack.visible = false; if (this.extra) for (const e of this.extra) e.visible = false; }
   setCrack(x, y, z, stage) {
     if (stage < 0) { this.crack.visible = false; return; }
     this.crack.visible = true;
@@ -316,6 +349,27 @@ export class ItemModels {
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), materials);
       group.add(mesh);
       group.userData.isBlock = true;
+    } else if (d && d.isBlock && SHAPE[id] === SHAPES.MODEL && MODELS[id]) {
+      // 台阶 / 楼梯 / 钟等模型方块：按模型盒子生成，UV 取纹理对应区域
+      const shades = [0.6, 0.6, 1, 0.5, 0.8, 0.8];
+      for (const bx of MODELS[id]) {
+        const [x0, y0, z0, x1, y1, z1] = bx.b;
+        const geo = new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0);
+        geo.translate((x0 + x1) / 2 - 0.5, (y0 + y1) / 2 - 0.5, (z0 + z1) / 2 - 0.5);
+        const p = geo.attributes.position, uv = geo.attributes.uv;
+        for (let i = 0; i < p.count; i++) {
+          const f = Math.floor(i / 4), X = p.getX(i) + 0.5, Y = p.getY(i) + 0.5, Z = p.getZ(i) + 0.5;
+          if (f < 2) uv.setXY(i, f === 0 ? 1 - Z : Z, Y);
+          else if (f < 4) uv.setXY(i, X, f === 2 ? 1 - Z : Z);
+          else uv.setXY(i, f === 4 ? X : 1 - X, Y);
+        }
+        const materials = bx.t.map((t, fi) => {
+          const m = new THREE.MeshBasicMaterial({ map: this.tileTexture(t < 0 ? 0 : t), alphaTest: 0.3 });
+          m.userData.shade = shades[fi]; m.color.setScalar(shades[fi]); mats.push(m); return m;
+        });
+        group.add(new THREE.Mesh(geo, materials));
+      }
+      group.userData.isBlock = true;
     } else {
       const t = d && d.isBlock ? FACE_TILES[id * 6] : TILES.indexOf('item_' + (d ? d.icon : 'stick'));
       const m = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
@@ -326,5 +380,144 @@ export class ItemModels {
     group.userData.mats = mats;
     return group;
   }
+  // 以指定贴图创建物品精灵（如拉弓中的弓）
+  createIcon(t) {
+    const group = new THREE.Group();
+    const m = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    m.userData.shade = 1;
+    group.add(new THREE.Mesh(this.spriteGeometry(t), m));
+    group.userData.isBlock = false; group.userData.mats = [m];
+    return group;
+  }
   setBrightness(obj, b) { for (const m of obj.userData.mats) m.color.setScalar(m.userData.shade * b); }
+}
+
+// ---------------- 天气：雨 / 雪柱状粒子（Java LevelRenderer.renderSnowAndRain 风格）----------------
+function weatherTex(snow) {
+  const c = document.createElement('canvas'); c.width = 64; c.height = 256;
+  const g = c.getContext('2d');
+  const r = mulberry32(snow ? 99 : 42);
+  if (!snow) {
+    for (let i = 0; i < 70; i++) {
+      const x = Math.floor(r() * 64), y = Math.floor(r() * 256), len = 10 + Math.floor(r() * 14);
+      const a = 0.35 + r() * 0.4;
+      g.fillStyle = `rgba(${150 + (r() * 40) | 0},${170 + (r() * 40) | 0},255,${a})`;
+      for (let k = 0; k < len; k++) g.fillRect(x, (y + k) % 256, 1, 1);
+    }
+  } else {
+    for (let i = 0; i < 90; i++) {
+      const x = Math.floor(r() * 62), y = Math.floor(r() * 254), s = r() < 0.4 ? 2 : 1;
+      g.fillStyle = `rgba(255,255,255,${0.7 + r() * 0.3})`; g.fillRect(x, y, s, s);
+    }
+  }
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+export class WeatherRenderer {
+  constructor(scene) {
+    this.R = 10;
+    const max = (this.R * 2 + 1) ** 2;
+    this.meshes = {};
+    for (const kind of ['rain', 'snow']) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(max * 4 * 3), 3));
+      geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(max * 4 * 2), 2));
+      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(max * 4 * 4), 4));
+      const idx = new Uint32Array(max * 6);
+      for (let i = 0; i < max; i++) idx.set([i * 4, i * 4 + 1, i * 4 + 2, i * 4, i * 4 + 2, i * 4 + 3], i * 6);
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+      const mat = new THREE.MeshBasicMaterial({ map: weatherTex(kind === 'snow'), transparent: true, depthWrite: false, side: THREE.DoubleSide, vertexColors: true, fog: false });
+      const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; m.renderOrder = 5; m.visible = false;
+      scene.add(m);
+      this.meshes[kind] = m;
+    }
+    this.heights = new Map(); this.hTick = 0;
+  }
+  // 降水高度缓存
+  height(world, x, z) {
+    const k = x * 73856093 ^ z * 19349663;
+    let h = this.heights.get(k);
+    if (h === undefined) { h = world.topY(x, z) + 1; this.heights.set(k, h); }
+    return h;
+  }
+  invalidate() { this.heights.clear(); }
+  update(world, cam, rain, time, darken, gamma, precipAt) {
+    if (rain <= 0.001) { this.meshes.rain.visible = this.meshes.snow.visible = false; return; }
+    if (++this.hTick > 20) { this.hTick = 0; this.heights.clear(); }
+    const cx = Math.floor(cam.x), cy = Math.floor(cam.y), cz = Math.floor(cam.z), R = this.R;
+    const cnt = { rain: 0, snow: 0 };
+    for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) {
+      const x = cx + dx, z = cz + dz;
+      const d2 = dx * dx + dz * dz; if (d2 > R * R) continue;
+      const kind = precipAt(x, z);
+      if (!kind) continue;
+      const ph = this.height(world, x, z);
+      let y0 = Math.max(ph, cy - R), y1 = Math.max(ph, cy + R);
+      if (y0 === y1) continue;
+      const mesh = this.meshes[kind], i = cnt[kind]++;
+      const pos = mesh.geometry.attributes.position.array, uv = mesh.geometry.attributes.uv.array, col = mesh.geometry.attributes.color.array;
+      // 四边形朝向相机
+      const ox = x + 0.5 - cam.x, oz = z + 0.5 - cam.z, L = Math.hypot(ox, oz) || 1;
+      const px = -oz / L * 0.5, pz = ox / L * 0.5;
+      const ax = x + 0.5 - px, az = z + 0.5 - pz, bx = x + 0.5 + px, bz = z + 0.5 + pz;
+      pos.set([ax, y0, az, bx, y0, bz, bx, y1, bz, ax, y1, az], i * 12);
+      const seed = ((x * 3121 + x * x * 45238971 + z * z * 418711 + z * 13761) & 31);
+      let v0, v1, u0 = 0, u1 = 1;
+      if (kind === 'rain') {
+        const sc = (time * 0.06 * 3.2 + seed) % 32;
+        v0 = (y0 * 0.25 + sc) / 4; v1 = (y1 * 0.25 + sc) / 4;
+        u0 = (seed % 4) / 4; u1 = u0 + 0.25;
+      } else {
+        const sc = -((time * 0.004 + seed) % 32);
+        v0 = (y0 * 0.25 + sc) / 4; v1 = (y1 * 0.25 + sc) / 4;
+        const drift = Math.sin(time * 0.01 + seed) * 0.05 + (seed % 8) / 8;
+        u0 = drift; u1 = drift + 0.25;
+      }
+      uv.set([u0, v0, u1, v0, u1, v1, u0, v1], i * 8);
+      const l = world.lightAt(x, Math.max(ph, cy), z);
+      const br = brightness(l.sky, l.block, darken, gamma);
+      const alpha = ((1 - d2 / (R * R)) * 0.5 + 0.5) * rain;
+      for (let k = 0; k < 4; k++) col.set([br, br, br, alpha], i * 16 + k * 4);
+    }
+    for (const kind of ['rain', 'snow']) {
+      const m = this.meshes[kind];
+      m.visible = cnt[kind] > 0;
+      m.geometry.setDrawRange(0, cnt[kind] * 6);
+      m.geometry.attributes.position.needsUpdate = true; m.geometry.attributes.uv.needsUpdate = true; m.geometry.attributes.color.needsUpdate = true;
+    }
+  }
+}
+
+// ---------------- 闪电（Java LightningBoltRenderer 风格的折线光束）----------------
+export function createLightningMesh(x, y, z, seed) {
+  const r = mulberry32(seed);
+  const group = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color: 0xd8dcff, transparent: true, opacity: 0.75, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
+  const seg = (ax, ay, az, bx, by, bz, w) => {
+    const h = Math.hypot(bx - ax, by - ay, bz - az);
+    const geo = new THREE.BoxGeometry(w, h, w);
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
+    m.lookAt(bx, by, bz); m.rotateX(Math.PI / 2);
+    group.add(m);
+  };
+  const bolt = (sx, sy, sz, ey, steps, width, spread) => {
+    let px = sx, py = sy, pz = sz;
+    const dy = (sy - ey) / steps;
+    for (let i = 0; i < steps; i++) {
+      const nx = i === steps - 1 && spread < 3 ? x : px + (r() - 0.5) * spread, nz = i === steps - 1 && spread < 3 ? z : pz + (r() - 0.5) * spread, ny = py - dy;
+      seg(px, py, pz, nx, ny, nz, width); seg(px, py, pz, nx, ny, nz, width * 2.4);
+      px = nx; py = ny; pz = nz;
+    }
+    return [px, py, pz];
+  };
+  const top = y + 128;
+  bolt(x + (r() - 0.5) * 6, top, z + (r() - 0.5) * 6, y, 16, 0.18, 2.5);
+  for (let b = 0; b < 3; b++) {
+    const sy = y + 30 + r() * 70;
+    bolt(x + (r() - 0.5) * 8, sy, z + (r() - 0.5) * 8, sy - 20 - r() * 20, 5, 0.1, 5);
+  }
+  group.userData.mat = mat;
+  return group;
 }

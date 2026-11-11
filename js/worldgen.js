@@ -1,6 +1,7 @@
 // 程序化地形生成：生物群系、洞穴、矿石、树木、植物
 import { Simplex, mulberry32, hash3 } from './noise.js';
 import { B, CHUNK, HEIGHT, SEA } from './registry.js';
+import { villagesForChunk, inVillage, buildVillages } from './village.js';
 
 export const BIOME = { OCEAN: 0, BEACH: 1, PLAINS: 2, FOREST: 3, DESERT: 4, SNOWY: 5, MOUNTAINS: 6, DEEP_OCEAN: 7, BIRCH_FOREST: 8 };
 export const BIOME_NAMES = ['海洋', '沙滩', '平原', '森林', '沙漠', '积雪的针叶林', '山地', '深海', '桦木森林'];
@@ -155,6 +156,7 @@ export class WorldGen {
     vein(B.redstone_ore, 6, 6, 5, 16);
     vein(B.diamond_ore, 2, 5, 5, 16);
 
+    const villages = villagesForChunk(this, cx, cz);
     // 树木（考虑相邻区块延伸过来的树冠）
     const put = (x, y, z, id, force) => {
       const lx = x - bx, lz = z - bz;
@@ -178,6 +180,7 @@ export class WorldGen {
       else if (biome === BIOME.SNOWY) { chance = 0.03; type = 'spruce'; }
       else if (biome === BIOME.MOUNTAINS) { chance = h < 96 ? 0.012 : 0; type = r2 < 0.6 ? 'spruce' : 'oak'; }
       if (r >= chance) continue;
+      if (villages.length && inVillage(villages, wx, wz, 3)) continue;
       if (inside) {
         const g = blocks[idx(wx - bx, h, wz - bz)];
         if (g !== B.grass_block && g !== B.snowy_grass_block) continue;
@@ -206,6 +209,20 @@ export class WorldGen {
           }
           if (ok) { const ch = 1 + Math.floor(hash3(bx + x, 5, bz + z, seed) * 3); for (let k = 0; k < ch; k++) blocks[idx(x, h + 1 + k, z)] = B.cactus; }
         } else if (r < 0.016) blocks[above] = B.dead_bush;
+      }
+    }
+    // 村庄
+    if (villages.length) buildVillages(villages, bx, bz, blocks, idx, this, (x, z) => hash3(x, 11, z, seed ^ 0x2545));
+    // 洞穴中的蜘蛛网（稀有，贴在洞顶）
+    for (let n = 0; n < 6; n++) {
+      const x = Math.floor(rnd() * 16), z = Math.floor(rnd() * 16), y0 = 8 + Math.floor(rnd() * 40);
+      if (rnd() > 0.35) continue;
+      for (let y = y0; y < y0 + 10 && y < HEIGHT - 1; y++) {
+        if (blocks[idx(x, y, z)] === 0 && blocks[idx(x, y + 1, z)] === B.stone) {
+          blocks[idx(x, y, z)] = B.cobweb;
+          for (let k = 0; k < 3; k++) { const ax = x + Math.round(rnd() * 2 - 1), az = z + Math.round(rnd() * 2 - 1), ay = y - Math.round(rnd()); if (ax >= 0 && ax < 16 && az >= 0 && az < 16 && blocks[idx(ax, ay, az)] === 0) blocks[idx(ax, ay, az)] = B.cobweb; }
+          break;
+        }
       }
     }
     return { blocks, biomes, heights };

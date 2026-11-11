@@ -22,7 +22,12 @@ export const LIGHT_EMIT = new Uint8Array(256);
 export const SHAPE = new Uint8Array(256);      // 0 无 1 方块 2 交叉 3 火把 4 液体 5 仙人掌 6 墙上火把
 export const RENDER = new Uint8Array(256);     // 0 不透明 1 镂空 2 半透明
 export const FACE_TILES = new Int16Array(256 * 6); // +x -x +y -y +z -z
-export const SHAPES = { NONE: 0, CUBE: 1, CROSS: 2, TORCH: 3, LIQUID: 4, CACTUS: 5, WALL_TORCH: 6 };
+export const SHAPES = { NONE: 0, CUBE: 1, CROSS: 2, TORCH: 3, LIQUID: 4, CACTUS: 5, WALL_TORCH: 6, MODEL: 7 };
+// 非完整方块的模型：MODELS[id] = [{ b:[x0,y0,z0,x1,y1,z1](世界朝向, 0..1), t:[6 个 tile，按世界面 +x -x +y -y +z -z], rot }]
+export const MODELS = new Array(256).fill(null);
+// 碰撞箱 / 选择框（0..1 方块坐标）；null 表示完整方块（或无碰撞，取决于 SOLID）
+export const COLLIDE = new Array(256).fill(null);
+export const SELECT = new Array(256).fill(null);
 
 function defBlock(id, key, p) {
   const d = Object.assign({
@@ -31,6 +36,7 @@ function defBlock(id, key, p) {
     replaceable: false, gravity: false, liquid: null, level: 0, drops: undefined,
     tab: 'building', item: id, interact: null, needsSupport: null, flammable: false,
   }, p);
+  if (d.resistance === undefined) d.resistance = d.hardness < 0 ? 3600000 : d.hardness;
   if (d.lightOpacity === undefined) d.lightOpacity = d.opaque ? 15 : 0;
   const t = d.tex || {};
   const all = t.all;
@@ -78,7 +84,7 @@ defBlock(22, 'snowy_grass_block', { name: '覆雪草方块', tex: { top: 'snow',
 defBlock(23, 'snow_block', { name: '雪块', tex: { all: 'snow' }, hardness: 0.2, tool: 'shovel', requiresTool: true, tier: 0, sound: 'snow', drops: (r) => ['snowball', 4] });
 defBlock(24, 'ice', { name: '冰', tex: { all: 'ice' }, hardness: 0.5, tool: 'pickaxe', opaque: false, render: 'translucent', lightOpacity: 1, sound: 'glass', drops: null, slippery: 0.98 });
 defBlock(25, 'cactus', { name: '仙人掌', tex: { top: 'cactus_top', side: 'cactus_side', bottom: 'cactus_bottom' }, hardness: 0.4, opaque: false, render: 'cutout', shape: 'cactus', sound: 'cloth', tab: 'deco', needsSupport: 'cactus' });
-defBlock(26, 'short_grass', { name: '草', tex: { all: 'short_grass' }, hardness: 0, solid: false, opaque: false, render: 'cutout', shape: 'cross', sound: 'grass', replaceable: true, tab: 'deco', needsSupport: 'soil', drops: (r) => null });
+defBlock(26, 'short_grass', { name: '草', tex: { all: 'short_grass' }, hardness: 0, solid: false, opaque: false, render: 'cutout', shape: 'cross', sound: 'grass', replaceable: true, tab: 'deco', needsSupport: 'soil', drops: (r) => (r() < 0.125 ? ['wheat_seeds', 1] : null) });
 defBlock(27, 'dandelion', { name: '蒲公英', tex: { all: 'dandelion' }, hardness: 0, solid: false, opaque: false, render: 'cutout', shape: 'cross', sound: 'grass', tab: 'deco', needsSupport: 'soil' });
 defBlock(28, 'poppy', { name: '虞美人', tex: { all: 'poppy' }, hardness: 0, solid: false, opaque: false, render: 'cutout', shape: 'cross', sound: 'grass', tab: 'deco', needsSupport: 'soil' });
 defBlock(29, 'dead_bush', { name: '枯萎的灌木', tex: { all: 'dead_bush' }, hardness: 0, solid: false, opaque: false, render: 'cutout', shape: 'cross', sound: 'grass', replaceable: true, tab: 'deco', needsSupport: 'sand', drops: (r) => ['stick', Math.floor(r() * 3)] });
@@ -109,6 +115,42 @@ defBlock(53, 'black_wool', { name: '黑色羊毛', tex: { all: 'black_wool' }, h
 defBlock(54, 'smooth_stone', { name: '平滑石头', tex: { all: 'smooth_stone' }, hardness: 2, tool: 'pickaxe', tier: 0, requiresTool: true });
 defBlock(55, 'pumpkin', { name: '南瓜', tex: { top: 'pumpkin_top', side: 'pumpkin_side' }, hardness: 1, tool: 'axe', sound: 'wood', tab: 'deco' });
 
+
+// 爆炸抗性（Java 版数值；未列出的与硬度相同）
+for (const [k, r] of Object.entries({ stone: 6, cobblestone: 6, mossy_cobblestone: 6, stone_bricks: 6, bricks: 6, smooth_stone: 6, oak_planks: 3, birch_planks: 3, spruce_planks: 3,
+  iron_block: 6, gold_block: 6, diamond_block: 6, coal_block: 6, obsidian: 1200, bedrock: 3600000, glass: 0.3, crafting_table: 2.5 })) BLOCKS[B[k]].resistance = r;
+
+// ---------------- 方块模型工具 ----------------
+// 绕 Y 轴旋转一步（+z → -x → -z → +x），局部像素坐标 (x,z) → (16-z, x)
+const ROT_FACE = [4, 5, 2, 3, 1, 0]; // 局部面 → 旋转一步后的世界面（+x→+z, -x→-z, +z→-x, -z→+x）
+function rotBox(b, r) {
+  let [x0, y0, z0, x1, y1, z1] = b;
+  for (let i = 0; i < r; i++) { const nx0 = 16 - z1, nx1 = 16 - z0; z0 = x0; z1 = x1; x0 = nx0; x1 = nx1; }
+  return [x0, y0, z0, x1, y1, z1];
+}
+function rotTiles(t, r) {
+  let cur = t.slice();
+  for (let i = 0; i < r; i++) { const n = new Array(6); for (let f = 0; f < 6; f++) n[ROT_FACE[f]] = cur[f]; cur = n; }
+  return cur;
+}
+// boxes: [{ b:[像素], t: 字符串 | [6 个局部面 tile 名] | {top,bottom,side,...} }]
+function faceNames(t) {
+  if (typeof t === 'string') return [t, t, t, t, t, t];
+  if (Array.isArray(t)) return t;
+  const side = t.side || t.all, top = t.top || t.all, bottom = t.bottom || t.top || t.all;
+  return [t.px || side, t.nx || side, top, bottom, t.pz || side, t.nz || side];
+}
+function setModel(id, boxes, rot = 0, collide, select) {
+  MODELS[id] = boxes.map((bx) => ({
+    b: rotBox(bx.b, rot).map((v) => v / 16),
+    t: rotTiles(faceNames(bx.t).map((n) => (n ? tile(n) : -1)), rot),
+    rot,
+  }));
+  const toUnits = (list) => list.map((b) => rotBox(b, rot).map((v) => v / 16));
+  COLLIDE[id] = collide === null ? [] : toUnits(collide || boxes.map((x) => x.b));
+  SELECT[id] = toUnits(select || boxes.map((x) => x.b));
+}
+
 // 朝向方块：furnace(4 朝向) / lit furnace / chest。front 面朝向：0:+z(南) 1:-x(西) 2:-z(北) 3:+x(东)
 export const FACING_DIRS = [[0, 0, 1], [-1, 0, 0], [0, 0, -1], [1, 0, 0]];
 const facingKey = ['pz', 'nx', 'nz', 'px'];
@@ -125,6 +167,102 @@ defFacing(104, 'lit_furnace', '熔炉', 'furnace_front_on', 'furnace_side', 'fur
 defFacing(108, 'chest', '箱子', 'chest_front', 'chest_side', 'chest_top', { hardness: 2.5, tool: 'axe', sound: 'wood', interact: 'chest', tab: 'deco' });
 // 墙上火把：朝向表示火把倚靠的墙在哪个方向
 for (let f = 0; f < 4; f++) defBlock(112 + f, 'wall_torch_' + f, { name: '火把', tex: { all: 'torch' }, hardness: 0, solid: false, opaque: false, render: 'cutout', shape: 'wall_torch', light: 14, sound: 'wood', facing: f, item: 30, drops: 'torch', tab: null, needsSupport: 'wall' });
+
+// ---------------- 1.x 新内容：耕地、土径、小麦、蜘蛛网、钟、床、台阶、楼梯、门 ----------------
+defBlock(56, 'dirt_path', { name: '土径', tex: { top: 'dirt_path_top', side: 'dirt_path_side', bottom: 'dirt' }, hardness: 0.65, tool: 'shovel', sound: 'gravel', opaque: false, shape: 'model', lightOpacity: 15, drops: 'dirt' });
+setModel(56, [{ b: [0, 0, 0, 16, 15, 16], t: { top: 'dirt_path_top', side: 'dirt_path_side', bottom: 'dirt' } }]);
+defBlock(57, 'farmland', { name: '耕地', tex: { top: 'farmland_top', side: 'dirt', bottom: 'dirt' }, hardness: 0.6, tool: 'shovel', sound: 'gravel', opaque: false, shape: 'model', lightOpacity: 15, drops: 'dirt', tab: null });
+setModel(57, [{ b: [0, 0, 0, 16, 15, 16], t: { top: 'farmland_top', side: 'dirt', bottom: 'dirt' } }]);
+for (let a = 0; a < 8; a++) {
+  defBlock(58 + a, 'wheat_' + a, { name: '小麦', tex: { all: 'wheat_stage_' + a }, hardness: 0, solid: false, opaque: false, render: 'cutout', shape: 'cross', sound: 'grass', tab: null, item: 0, age: a, crop: true, needsSupport: 'farmland',
+    drops: a === 7 ? (r) => [['wheat', 1], ['wheat_seeds', 1 + [0, 1, 2].reduce((n) => n + (r() < 0.5714 ? 1 : 0), 0)]] : 'wheat_seeds' });
+}
+defBlock(66, 'cobweb', { name: '蜘蛛网', tex: { all: 'cobweb' }, hardness: 4, tool: 'sword', solid: false, opaque: false, render: 'cutout', shape: 'cross', sound: 'cloth', tab: 'deco', web: true, resistance: 4,
+  drops: (r, tool) => (tool && tool.type === 'sword' ? 'string' : null) });
+for (let f = 0; f < 4; f++) {
+  defBlock(f === 0 ? 67 : 116 + f - 1, f === 0 ? 'bell' : 'bell_' + f, { name: '钟', tex: { all: 'gold_block', icon: 'gold_block' }, hardness: 5, tool: 'pickaxe', sound: 'metal', opaque: false, shape: 'model', lightOpacity: 0, facing: f, baseKey: 'bell', item: 67, tab: f === 0 ? 'deco' : null, interact: 'bell', resistance: 5 });
+  setModel(f === 0 ? 67 : 116 + f - 1, [
+    { b: [0, 0, 6, 2, 16, 10], t: 'stone' }, { b: [14, 0, 6, 16, 16, 10], t: 'stone' }, { b: [2, 13, 7, 14, 15, 9], t: 'spruce_log' },
+    { b: [5, 6, 5, 11, 13, 11], t: 'bell_body' }, { b: [4, 4, 4, 12, 6, 12], t: 'bell_body' },
+  ], f, [[0, 0, 6, 2, 16, 10], [14, 0, 6, 16, 16, 10], [4, 4, 4, 12, 13, 12]]);
+}
+export const BELL_IDS = [67, 116, 117, 118];
+// 床：68 + 颜色*8 + 朝向*2 + (床头?1:0)；朝向为玩家放置时的视线方向，床头位于朝向一侧
+export const BED_COLORS = [['red', '红色'], ['white', '白色']];
+BED_COLORS.forEach(([c, cn], ci) => {
+  for (let f = 0; f < 4; f++) for (let head = 0; head < 2; head++) {
+    const id = 68 + ci * 8 + f * 2 + head;
+    const part = head ? 'head' : 'foot';
+    defBlock(id, `${c}_bed_${part}_${f}`, { name: `${cn}的床`, tex: { all: `bed_${c}_${part}_top`, icon: `bed_${c}_${part}_top` }, hardness: 0.2, sound: 'wood', opaque: false, shape: 'model', lightOpacity: 0,
+      facing: f, bed: { color: c, head: !!head }, tab: null, item: 0, drops: `${c}_bed`, interact: 'bed', resistance: 0.2 });
+    const legZ = head ? 13 : 0; // 床腿在外侧的两角
+    const endT = `bed_${c}_${part}_end`, sideT = `bed_${c}_${part}_side`;
+    setModel(id, [
+      { b: [0, 3, 0, 16, 9, 16], t: [sideT, sideT, `bed_${c}_${part}_top`, 'oak_planks', head ? endT : sideT, head ? sideT : endT] },
+      { b: [0, 0, legZ, 3, 3, legZ + 3], t: 'bed_leg' }, { b: [13, 0, legZ, 16, 3, legZ + 3], t: 'bed_leg' },
+    ], f, [[0, 0, 0, 16, 9, 16]], [[0, 0, 0, 16, 9, 16]]);
+  }
+});
+export function isBed(id) { return id >= 68 && id <= 83; }
+
+// 台阶 / 楼梯材料
+export const SS_MATS = [
+  { key: 'oak', name: '橡木', base: 'oak_planks', slab: '橡木台阶', stairs: '橡木楼梯', hardness: 2, resistance: 3, tool: 'axe', sound: 'wood', tier: -1, requiresTool: false },
+  { key: 'birch', name: '白桦木', base: 'birch_planks', slab: '白桦木台阶', stairs: '白桦木楼梯', hardness: 2, resistance: 3, tool: 'axe', sound: 'wood', tier: -1, requiresTool: false },
+  { key: 'spruce', name: '云杉木', base: 'spruce_planks', slab: '云杉木台阶', stairs: '云杉木楼梯', hardness: 2, resistance: 3, tool: 'axe', sound: 'wood', tier: -1, requiresTool: false },
+  { key: 'cobblestone', name: '圆石', base: 'cobblestone', slab: '圆石台阶', stairs: '圆石楼梯', hardness: 2, resistance: 6, tool: 'pickaxe', sound: 'stone', tier: 0, requiresTool: true },
+  { key: 'stone', name: '石', base: 'stone', slab: '石台阶', stairs: '石楼梯', hardness: 2, resistance: 6, tool: 'pickaxe', sound: 'stone', tier: 0, requiresTool: true, stairHardness: 1.5 },
+  { key: 'stone_brick', name: '石砖', base: 'stone_bricks', slab: '石砖台阶', stairs: '石砖楼梯', hardness: 2, resistance: 6, tool: 'pickaxe', sound: 'stone', tier: 0, requiresTool: true, stairHardness: 1.5 },
+  { key: 'sandstone', name: '砂岩', base: 'sandstone', slab: '砂岩台阶', stairs: '砂岩楼梯', hardness: 2, resistance: 6, tool: 'pickaxe', sound: 'stone', tier: 0, requiresTool: true, stairHardness: 0.8, stairRes: 0.8 },
+  { key: 'brick', name: '红砖', base: 'bricks', slab: '红砖台阶', stairs: '红砖楼梯', hardness: 2, resistance: 6, tool: 'pickaxe', sound: 'stone', tier: 0, requiresTool: true },
+];
+const FACE_NAMES = (key) => { const b = BLOCKS[B[key]]; const t = b.tex || {}; const side = t.side || t.all, top = t.top || t.all, bottom = t.bottom || t.top || t.all; return { side, top, bottom }; };
+// 台阶：135 + m*3 + (0 下半 / 1 上半 / 2 双层)
+export const SLAB_BASE = 135, STAIRS_BASE = 159;
+SS_MATS.forEach((m, mi) => {
+  const fn = FACE_NAMES(m.base);
+  const common = { hardness: m.hardness, resistance: m.resistance, tool: m.tool, sound: m.sound, tier: m.tier, requiresTool: m.requiresTool, flammable: m.sound === 'wood' };
+  const id0 = SLAB_BASE + mi * 3;
+  defBlock(id0, `${m.key}_slab`, Object.assign({ name: m.slab, tex: { ...fn, icon: fn.top }, opaque: false, shape: 'model', lightOpacity: 15, slab: { mat: mi, half: 0 } }, common));
+  setModel(id0, [{ b: [0, 0, 0, 16, 8, 16], t: fn }]);
+  defBlock(id0 + 1, `${m.key}_slab_top`, Object.assign({ name: m.slab, tex: { ...fn, icon: fn.top }, opaque: false, shape: 'model', lightOpacity: 15, slab: { mat: mi, half: 1 }, item: id0, tab: null }, common));
+  setModel(id0 + 1, [{ b: [0, 8, 0, 16, 16, 16], t: fn }]);
+  defBlock(id0 + 2, `${m.key}_slab_double`, Object.assign({ name: m.slab, tex: { ...fn }, slab: { mat: mi, half: 2 }, item: id0, tab: null, drops: [`${m.key}_slab`, 2] }, common));
+  // 楼梯：159 + m*8 + 上下*4 + 朝向（朝向 = 玩家视线方向，高的一侧在朝向方向）
+  for (let half = 0; half < 2; half++) for (let f = 0; f < 4; f++) {
+    const id = STAIRS_BASE + mi * 8 + half * 4 + f;
+    defBlock(id, half === 0 && f === 0 ? `${m.key}_stairs` : `${m.key}_stairs_${half}_${f}`, Object.assign({}, common, {
+      name: m.stairs, tex: { ...fn, icon: fn.top }, opaque: false, shape: 'model', lightOpacity: 15, facing: f, stairs: { mat: mi, half }, item: STAIRS_BASE + mi * 8,
+      tab: half === 0 && f === 0 ? 'building' : null, hardness: m.stairHardness ?? m.hardness, resistance: m.stairRes ?? m.resistance }));
+    // 局部朝向 +z（南）：下半台阶 + 南半部分的上层
+    const slabBox = half ? [0, 8, 0, 16, 16, 16] : [0, 0, 0, 16, 8, 16];
+    const stepBox = half ? [0, 0, 8, 16, 8, 16] : [0, 8, 8, 16, 16, 16];
+    setModel(id, [{ b: slabBox, t: fn }, { b: stepBox, t: fn }], f);
+  }
+});
+export function slabInfo(id) { const b = BLOCKS[id]; return b && b.slab; }
+// 门：223 + 上半*16 + 打开*8 + 铰链右*4 + 朝向
+export const DOOR_BASE = 223;
+export function doorId(upper, open, right, f) { return DOOR_BASE + (upper ? 16 : 0) + (open ? 8 : 0) + (right ? 4 : 0) + f; }
+export function isDoor(id) { return id >= DOOR_BASE && id < DOOR_BASE + 32; }
+export function doorState(id) { const k = id - DOOR_BASE; return { upper: !!(k & 16), open: !!(k & 8), right: !!(k & 4), facing: k & 3 }; }
+{
+  // Java DoorBlock.getShape：S_AABB z0-3、N_AABB z13-16、W_AABB x13-16、E_AABB x0-3
+  const AABB = { S: [0, 0, 0, 16, 16, 3], N: [0, 0, 13, 16, 16, 16], W: [13, 0, 0, 16, 16, 16], E: [0, 0, 0, 3, 16, 16] };
+  const shape = (f, open, right) => {
+    const dir = ['S', 'W', 'N', 'E'][f];
+    if (!open) return { S: 'S', W: 'W', N: 'N', E: 'E' }[dir];
+    return { E: right ? 'N' : 'S', S: right ? 'E' : 'W', W: right ? 'S' : 'N', N: right ? 'W' : 'E' }[dir];
+  };
+  for (let up = 0; up < 2; up++) for (let open = 0; open < 2; open++) for (let right = 0; right < 2; right++) for (let f = 0; f < 4; f++) {
+    const id = doorId(up, open, right, f);
+    const tx = up ? 'oak_door_top' : 'oak_door_bottom';
+    defBlock(id, up || open || right || f ? `oak_door_${up}${open}${right}${f}` : 'oak_door_block', { name: '橡木门', tex: { all: tx, icon: tx }, hardness: 3, resistance: 3, tool: 'axe', sound: 'wood', opaque: false, shape: 'model', lightOpacity: 0,
+      door: { upper: !!up, open: !!open, right: !!right, facing: f }, tab: null, item: 0, drops: up ? null : 'oak_door', interact: 'door' });
+    const box = AABB[shape(f, open, right)];
+    setModel(id, [{ b: box, t: tx }]);
+  }
+}
 
 // 液体：水源 120，流动 121-127(等级1-7)，下落 128；岩浆源 130，流动 131-133，下落 134
 defBlock(120, 'water', { name: '水', tex: { all: 'water' }, hardness: 100, solid: false, opaque: false, render: 'translucent', shape: 'liquid', liquid: 'water', level: 0, lightOpacity: 1, replaceable: true, sound: 'water', tab: null, item: 0 });
@@ -147,6 +285,9 @@ export function liquidId(type, level) {
 
 // 破坏裂纹
 for (let i = 0; i < 10; i++) tile('destroy_' + i);
+// 拉弓动画与特效粒子
+for (let i = 0; i < 3; i++) tile('item_bow_pulling_' + i);
+tile('fx_explosion'); tile('fx_smoke'); tile('fx_lightning');
 
 // ---------------- 物品 ----------------
 export const ITEMS = new Map(); // id -> def
@@ -190,6 +331,48 @@ defItem(278, 'lava_bucket', '岩浆桶', { maxStack: 1, tab: 'tools', bucket: 'l
 defItem(279, 'bread', '面包', { food: [5, 6], tab: 'food' });
 defItem(280, 'compass', '指南针', { tab: null });
 
+defItem(281, 'bow', '弓', { maxStack: 1, tab: 'combat', durability: 384, bow: true, fuel: 300 });
+defItem(282, 'arrow', '箭', { tab: 'combat' });
+defItem(283, 'string', '线');
+defItem(284, 'feather', '羽毛');
+defItem(285, 'gunpowder', '火药');
+defItem(286, 'bone', '骨头');
+defItem(287, 'bone_meal', '骨粉', { boneMeal: true });
+defItem(288, 'wheat_seeds', '小麦种子', { block: 58, plant: 'farmland' });
+defItem(289, 'wheat', '小麦');
+defItem(290, 'chicken', '生鸡肉', { food: [2, 1.2], tab: 'food' });
+defItem(291, 'cooked_chicken', '熟鸡肉', { food: [6, 7.2], tab: 'food' });
+defItem(292, 'oak_door', '橡木门', { block: DOOR_BASE, tab: 'building', placeDoor: true, fuel: 200 });
+defItem(293, 'red_bed', '红色的床', { block: 68, tab: 'deco', maxStack: 1, placeBed: 0 });
+defItem(294, 'white_bed', '白色的床', { block: 76, tab: 'deco', maxStack: 1, placeBed: 1 });
+for (let i = DOOR_BASE; i < DOOR_BASE + 32; i++) BLOCKS[i].item = 292;
+for (let i = 68; i < 84; i++) BLOCKS[i].item = i < 76 ? 293 : 294;
+for (let i = 58; i < 66; i++) BLOCKS[i].item = 288;
+
+// ---------------- 盔甲（Java 版：护甲值、盔甲韧性、耐久 = 基础 × 部位系数）----------------
+export const ARMOR_SLOTS = [
+  { key: 'helmet', name: '头盔', mult: 11 }, { key: 'chestplate', name: '胸甲', mult: 16 },
+  { key: 'leggings', name: '护腿', mult: 15 }, { key: 'boots', name: '靴子', mult: 13 },
+];
+export const ARMOR_MATS = [
+  { key: 'leather', base: 5, def: [1, 3, 2, 1], tough: 0, names: ['皮革帽子', '皮革外套', '皮革裤子', '皮革靴子'], color: 0xa0653a, ingredient: 'leather' },
+  { key: 'chainmail', base: 15, def: [2, 5, 4, 1], tough: 0, names: ['锁链头盔', '锁链胸甲', '锁链护腿', '锁链靴子'], color: 0x8a8a90, ingredient: null },
+  { key: 'iron', base: 15, def: [2, 6, 5, 2], tough: 0, names: ['铁头盔', '铁胸甲', '铁护腿', '铁靴子'], color: 0xd8d8d8, ingredient: 'iron_ingot' },
+  { key: 'golden', base: 7, def: [2, 5, 3, 1], tough: 0, names: ['金头盔', '金胸甲', '金护腿', '金靴子'], color: 0xf2d23a, ingredient: 'gold_ingot' },
+  { key: 'diamond', base: 33, def: [3, 8, 6, 3], tough: 2, names: ['钻石头盔', '钻石胸甲', '钻石护腿', '钻石靴子'], color: 0x4ee2da, ingredient: 'diamond' },
+];
+ARMOR_MATS.forEach((m, mi) => ARMOR_SLOTS.forEach((sl, si) => {
+  const key = `${m.key}_${sl.key}`;
+  defItem(320 + mi * 4 + si, key, m.names[si], { maxStack: 1, tab: 'combat', icon: key, durability: m.base * sl.mult,
+    armor: { slot: si, defense: m.def[si], toughness: m.tough, material: m.key, color: m.color } });
+}));
+// Java：伤害 × (1 - min(20, max(护甲/5, 护甲 - 4×伤害/(韧性+8))) / 25)
+export function armorReduce(damage, defense, toughness) {
+  const f = Math.min(20, Math.max(defense / 5, defense - (4 * damage) / (toughness + 8)));
+  return damage * (1 - f / 25);
+}
+export function durabilityOf(d) { return d ? (d.tool ? d.tool.durability : d.durability || 0) : 0; }
+
 export const MATERIALS = [
   { key: 'wooden', name: '木', speed: 2, tier: 0, durability: 59, fuel: 200, dmg: { sword: 4, axe: 7, pickaxe: 2, shovel: 2.5 }, axeSpeed: 0.8 },
   { key: 'stone', name: '石', speed: 4, tier: 1, durability: 131, dmg: { sword: 5, axe: 9, pickaxe: 3, shovel: 3.5 }, axeSpeed: 0.8 },
@@ -212,6 +395,13 @@ MATERIALS.forEach((m, mi) => TOOL_TYPES.forEach((t, ti) => {
   });
 }));
 
+// 锄（Java：攻击伤害 1，攻速 木1 石2 铁3 金1 钻石4）
+MATERIALS.forEach((m, mi) => {
+  const key = `${m.key}_hoe`;
+  defItem(340 + mi, key, `${m.name}锄`, { maxStack: 1, tab: 'tools', icon: key, fuel: m.key === 'wooden' ? 200 : undefined,
+    tool: { type: 'hoe', speed: m.speed, tier: m.tier, durability: m.durability, damage: 1, attackSpeed: [1, 2, 3, 1, 4][mi], material: m.key } });
+});
+
 export function itemDef(id) { return ITEMS.get(id); }
 export function maxStack(id) { const d = ITEMS.get(id); return d ? d.maxStack : 64; }
 export function itemName(id) { const d = ITEMS.get(id); return d ? d.name : '?'; }
@@ -230,7 +420,7 @@ export const SMELTING = new Map([
   [I.cobblestone, I.stone], [I.stone, I.smooth_stone], [I.sand, I.glass], [I.iron_ore, I.iron_ingot], [I.gold_ore, I.gold_ingot],
   [I.oak_log, I.charcoal], [I.birch_log, I.charcoal], [I.spruce_log, I.charcoal],
   [I.porkchop, I.cooked_porkchop], [I.beef, I.cooked_beef], [I.mutton, I.cooked_mutton],
-  [I.clay_ball, I.brick], [I.diamond_ore, I.diamond], [I.coal_ore, I.coal], [I.redstone_ore, I.redstone],
+  [I.clay_ball, I.brick], [I.diamond_ore, I.diamond], [I.coal_ore, I.coal], [I.redstone_ore, I.redstone], [I.chicken, I.cooked_chicken],
 ]);
 
 // ---------------- 合成配方 ----------------
@@ -273,6 +463,28 @@ for (const [m, ing] of Object.entries(toolMats)) {
   shaped(['M', 'S', 'S'], { M: ing, S: 'stick' }, `${m}_shovel`);
   shaped(['M', 'M', 'S'], { M: ing, S: 'stick' }, `${m}_sword`);
 }
+
+// 台阶 ×6、楼梯 ×4
+for (const m of SS_MATS) {
+  shaped(['XXX'], { X: m.base }, `${m.key}_slab`, 6);
+  shaped(['X  ', 'XX ', 'XXX'], { X: m.base }, `${m.key}_stairs`, 4);
+}
+shaped(['PP', 'PP', 'PP'], { P: 'oak_planks' }, 'oak_door', 3);
+shaped(['WWW', 'PPP'], { W: 'red_wool', P: '#planks' }, 'red_bed');
+shaped(['WWW', 'PPP'], { W: 'white_wool', P: '#planks' }, 'white_bed');
+shaped([' TS', 'T S', ' TS'], { T: 'stick', S: 'string' }, 'bow');
+shaped(['F', 'S', 'E'], { F: 'flint', S: 'stick', E: 'feather' }, 'arrow', 4);
+shaped(['SS', 'SS'], { S: 'string' }, 'white_wool');
+shaped(['WWW'], { W: 'wheat' }, 'bread');
+shapeless(['bone'], 'bone_meal', 3);
+for (const m of ARMOR_MATS) {
+  if (!m.ingredient) continue; // 锁链盔甲在 Java 版中无法合成
+  shaped(['XXX', 'X X'], { X: m.ingredient }, `${m.key}_helmet`);
+  shaped(['X X', 'XXX', 'XXX'], { X: m.ingredient }, `${m.key}_chestplate`);
+  shaped(['XXX', 'X X', 'X X'], { X: m.ingredient }, `${m.key}_leggings`);
+  shaped(['X X', 'X X'], { X: m.ingredient }, `${m.key}_boots`);
+}
+for (const [m, ing] of Object.entries(toolMats)) shaped(['MM', ' S', ' S'], { M: ing, S: 'stick' }, `${m}_hoe`);
 
 function ingMatch(spec, id) {
   if (!spec) return id === 0;
@@ -330,10 +542,11 @@ export function digSpeed(block, tool) {
   if (block.hardness === 0) return 1;
   let speed = 1;
   if (tool) {
-    if (tool.type === block.tool) speed = tool.speed;
+    if (block.web && (tool.type === 'sword')) speed = 15;
+    else if (tool.type === block.tool) speed = tool.speed;
     else if (tool.type === 'sword' && block.tool === 'hoe') speed = 1.5;
   }
-  return speed / block.hardness / (canHarvest(block, tool) ? 30 : 100);
+  return speed / block.hardness / (canHarvest(block, tool) && (!block.web || (tool && tool.type === 'sword')) ? 30 : 100);
 }
 
 // 创造模式物品栏分类

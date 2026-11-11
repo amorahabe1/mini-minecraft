@@ -1,5 +1,5 @@
 // 程序化生成所有像素纹理（原创绘制，不使用任何官方素材）
-import { TILES, ITEMS, BLOCKS, SHAPE, SHAPES, FACE_TILES } from './registry.js';
+import { TILES, ITEMS, BLOCKS, SHAPE, SHAPES, FACE_TILES, MODELS, ARMOR_MATS, ARMOR_SLOTS } from './registry.js';
 import { mulberry32 } from './noise.js';
 
 const S = 16;
@@ -319,7 +319,68 @@ const DRAW = {
       t.set(x, y, shade(c, 0.9 + t.r() * 0.15));
     }
   },
+  // ---------- 新方块 ----------
+  dirt_path_top: (t) => { t.palette([hex(0x9a7a46), hex(0x8d6f3e), hex(0xa4844f), hex(0x94763f)]); t.speck(hex(0x7a5e32), 10); t.speck(hex(0xb09060), 5); },
+  dirt_path_side: (t) => { dirt(t); for (let x = 0; x < S; x++) { const d = 2 + Math.floor(t.r() * 2); for (let y = 0; y < d; y++) t.set(x, y, shade(hex(0x9a7a46), 0.85 + t.r() * 0.25)); } },
+  farmland_top: (t) => {
+    t.palette([hex(0x5a3a20), hex(0x4e321c), hex(0x633f22), hex(0x553620)]);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) { if (x % 4 === 0) t.set(x, y, hex(0x3a2412)); else if (x % 4 === 1) t.set(x, y, shade(hex(0x6e4a2a), 0.9 + t.r() * 0.2)); }
+    for (let i = 0; i < S; i++) { t.set(i, 0, hex(0x40281a)); t.set(i, 15, hex(0x40281a)); }
+  },
+  cobweb: (t) => cross(t, (t) => {
+    const c = hex(0xe8e8ec);
+    for (let i = 0; i < S; i++) { t.set(i, i, c, 220); t.set(15 - i, i, c, 220); t.set(7, i, c, 200); t.set(i, 8, c, 200); }
+    for (const r of [3, 6]) for (let a = 0; a < 32; a++) { const ang = a / 32 * Math.PI * 2; t.set(Math.round(7.5 + Math.cos(ang) * r), Math.round(7.5 + Math.sin(ang) * r), c, 170); }
+  }),
+  bell_body: (t) => { metalBlock(t, hex(0xf2c83a)); for (let x = 0; x < S; x++) t.set(x, 12, hex(0xb08a1a)); },
+  bed_leg: (t) => planks(t, hex(0x7a5530)),
+  oak_door_top: (t) => door(t, true),
+  oak_door_bottom: (t) => door(t, false),
 };
+function door(t, top) {
+  const base = C.oakPlank, dk = shade(base, 0.62);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let c = shade(base, 0.9 + (t.r() - 0.5) * 0.1 + (x % 5 === 0 ? -0.08 : 0));
+    if (x === 0 || x === 15 || (top ? y === 0 : y === 15)) c = dk;
+    t.set(x, y, c);
+  }
+  if (top) {
+    // 两扇小窗
+    for (const x0 of [2, 9]) { t.rect(x0, 3, 5, 5, hex(0x2a1e10)); t.rect(x0 + 1, 4, 3, 3, [184, 214, 224], 140); t.set(x0 + 1, 4, hex(0xe8f4f8)); }
+    for (let x = 1; x < 15; x++) t.set(x, 10, dk);
+  } else {
+    for (let x = 1; x < 15; x++) { t.set(x, 2, dk); t.set(x, 9, dk); }
+    for (let y = 2; y < 10; y++) { t.set(5, y, dk); t.set(10, y, dk); }
+    t.rect(12, 0, 2, 2, hex(0x3a3a3a)); t.set(12, 0, hex(0x9a9a9a));
+  }
+}
+// 小麦生长阶段 0-7
+for (let a = 0; a < 8; a++) {
+  DRAW['wheat_stage_' + a] = (t) => cross(t, (t) => {
+    const hgt = 3 + Math.round(a * 1.6);
+    const green = hex(0x4fa02a), yellow = hex(0xc8a83a);
+    const col = mix(green, yellow, Math.max(0, (a - 4) / 3));
+    for (const x0 of [1, 4, 7, 10, 13]) {
+      let x = x0 + Math.floor(t.r() * 2);
+      for (let k = 0; k < hgt; k++) { t.set(x, 15 - k, shade(col, 0.75 + t.r() * 0.4)); if (t.r() < 0.2) x += t.r() < 0.5 ? -1 : 1; }
+      if (a >= 5) for (let k = 0; k < 3; k++) { t.set(x, 15 - hgt - k, shade(a === 7 ? hex(0xd8b048) : col, 0.9 + t.r() * 0.2)); t.set(x + 1, 16 - hgt - k, shade(hex(0xb08a2a), 0.9)); }
+    }
+  });
+}
+// 床
+const BED_COL = { red: hex(0xb02a24), white: hex(0xe6e6e6) };
+for (const c of ['red', 'white']) {
+  const bc = BED_COL[c], frame = hex(0x7a5530), pillow = hex(0xf4f4f4);
+  DRAW[`bed_${c}_head_top`] = (t) => { wool(t, bc); t.rect(2, 9, 12, 5, pillow); for (let x = 2; x < 14; x++) { t.set(x, 9, hex(0xd8d8d8)); t.set(x, 13, hex(0xd0d0d0)); } t.set(2, 9, bc); t.set(13, 9, bc); for (let x = 0; x < S; x++) t.set(x, 15, shade(bc, 0.75)); };
+  DRAW[`bed_${c}_foot_top`] = (t) => { wool(t, bc); for (let x = 0; x < S; x++) { t.set(x, 0, shade(bc, 0.75)); t.set(x, 4, shade(bc, 1.12)); } };
+  const side = (t) => { t.clear(); for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) { if (y < 7) continue; t.set(x, y, y < 10 ? shade(bc, 0.85 + t.r() * 0.15) : shade(frame, 0.85 + t.r() * 0.2)); } };
+  DRAW[`bed_${c}_head_side`] = side; DRAW[`bed_${c}_foot_side`] = side;
+  DRAW[`bed_${c}_head_end`] = (t) => { side(t); for (let x = 0; x < S; x++) t.set(x, 10, shade(frame, 0.7)); };
+  DRAW[`bed_${c}_foot_end`] = (t) => { side(t); for (let x = 0; x < S; x++) t.set(x, 10, shade(frame, 0.7)); };
+}
+DRAW.fx_explosion = (t) => { t.clear(); for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) { const d = Math.hypot(x - 7.5, y - 7.5); if (d < 7.5 - t.r() * 2) t.set(x, y, shade(hex(0xe8e8e0), 0.75 + t.r() * 0.3)); } };
+DRAW.fx_smoke = (t) => { t.clear(); for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) { const d = Math.hypot(x - 7.5, y - 7.5); if (d < 7 - t.r() * 2) t.set(x, y, shade(hex(0x5a5a5a), 0.7 + t.r() * 0.4), 220); } };
+DRAW.fx_lightning = (t) => { t.noise(hex(0xeef0ff), 0.02); };
 // 破坏裂纹
 const crackSeeds = [];
 {
@@ -373,6 +434,9 @@ function toolIcon(t, type, mat) {
     } else if (type === 'axe') {
       const rows = { 1: [8, 10], 2: [7, 12], 3: [7, 13], 4: [8, 13], 5: [9, 13], 6: [10, 12], 7: [11, 11] };
       for (const [y, [a, b]] of Object.entries(rows)) for (let x = a; x <= b; x++) t.set(x, +y, x === b ? hi : x === a ? dk : m);
+    } else if (type === 'hoe') {
+      for (let x = 7; x <= 13; x++) { t.set(x, 2, x === 13 ? hi : m); t.set(x, 3, dk); }
+      t.set(13, 3, m); t.set(13, 4, dk);
     } else if (type === 'shovel') {
       const rows = { 1: [11, 12], 2: [10, 13], 3: [9, 14], 4: [9, 14], 5: [9, 13], 6: [10, 12] };
       for (const [y, [a, b]] of Object.entries(rows)) for (let x = a; x <= b; x++) t.set(x, +y, x === a || +y === 6 ? dk : (x === b - 1 && +y < 4 ? hi : m));
@@ -442,6 +506,80 @@ const ITEM_DRAW = {
     t.outline(hex(0x1a1a1a));
   },
 };
+// ---- 战斗与材料 ----
+const WOOD = hex(0x8a5a2a), STR = hex(0xe8e8e8);
+function bowIcon(t, pull) {
+  t.clear();
+  // 弓臂（左上到右下的弧）+ 弦
+  const arc = [[5, 1], [6, 1], [7, 1], [8, 2], [9, 2], [10, 3], [11, 4], [12, 5], [13, 6], [13, 7], [14, 8], [14, 9], [14, 10]];
+  const shift = pull; // 拉弓时弓臂往后弯
+  const pts = [];
+  for (const [x, y] of arc) pts.push([x, y]);
+  for (const [x, y] of arc) pts.push([y, x]);
+  for (const [x, y] of pts) { t.set(x - shift, y - shift, WOOD); t.set(x - shift + 1, y - shift, shade(WOOD, 0.7)); }
+  t.set(9 - shift, 9 - shift, hex(0x5a3a1a)); t.set(10 - shift, 10 - shift, hex(0x5a3a1a));
+  // 两端点 (4,1) 与 (1,4)，拉弓时弦中点往左上方移动
+  const p0 = [4 - shift, 1 - shift], p1 = [1 - shift, 4 - shift];
+  const mid = [Math.max(0, 2 - pull * 1.5), Math.max(0, 2 - pull * 1.5)];
+  for (let i = 0; i <= 8; i++) {
+    const a = i / 8;
+    const x = a < 0.5 ? p0[0] + (mid[0] - p0[0]) * a * 2 : mid[0] + (p1[0] - mid[0]) * (a - 0.5) * 2;
+    const y = a < 0.5 ? p0[1] + (mid[1] - p0[1]) * a * 2 : mid[1] + (p1[1] - mid[1]) * (a - 0.5) * 2;
+    t.set(Math.round(x), Math.round(y), STR);
+  }
+  if (pull > 0) { // 搭在弦上的箭
+    for (let i = 0; i < 7 + pull; i++) t.set(Math.round(mid[0]) + 2 + i, Math.round(mid[1]) + 2 + i, hex(0x9a7a4a));
+    const hx = Math.round(mid[0]) + 9 + pull, hy = Math.round(mid[1]) + 9 + pull;
+    t.set(hx, hy, hex(0xb0b0b0)); t.set(hx - 1, hy, hex(0x808080)); t.set(hx, hy - 1, hex(0x808080));
+  }
+  t.outline(OUT);
+}
+function armorIcon(t, slot, base) {
+  t.clear();
+  const T = [
+    ['', '', '', '....aaaaaaaa', '...abbbbbbbba', '...abccccccba', '...abc....cba', '...abc....cba', '...aa......aa', ''],
+    ['', '..aaa....aaa', '.abba....abba', '.abbbaaaabbba', '.abbbbbbbbbba', '..aabbbbbbaa', '....abbbbba', '....abcbcba', '....abbbbba', '....abcbcba', '....abbbbba', '....abbbbba', '....aaaaaaa'],
+    ['', '', '...aaaaaaaaa', '...abbbbbbba', '...abbccbbba', '...abba.abba', '...abba.abba', '...abba.abba', '...abba.abba', '...abba.abba', '...abba.abba', '...aaaa.aaaa'],
+    ['', '', '', '', '', '', '...aaa..aaa', '...aba..aba', '...aba..aba', '..abba..abba', '.abbba..abbba', '.aaaaa..aaaaa'],
+  ][slot];
+  t.template(T, { a: shade(base, 0.55), b: base, c: shade(base, 1.25) });
+  // 高光
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) { const c = t.get(x, y); if (c[3] && c[0] === base[0] && t.r() < 0.12) t.set(x, y, shade(base, 1.15)); }
+  t.outline(OUT);
+}
+Object.assign(ITEM_DRAW, {
+  bow: (t) => bowIcon(t, 0),
+  bow_pulling_0: (t) => bowIcon(t, 1),
+  bow_pulling_1: (t) => bowIcon(t, 2),
+  bow_pulling_2: (t) => bowIcon(t, 3),
+  arrow: (t) => {
+    t.clear();
+    for (let i = 0; i < 10; i++) t.set(3 + i, 12 - i, hex(0x8a6a3a));
+    t.set(12, 2, hex(0xd0d0d0)); t.set(13, 2, hex(0x9a9a9a)); t.set(12, 3, hex(0x9a9a9a)); t.set(13, 1, hex(0xe8e8e8)); t.set(11, 2, hex(0xb0b0b0)); t.set(12, 1, hex(0xb0b0b0));
+    for (const [x, y] of [[2, 11], [3, 11], [1, 12], [2, 12], [4, 13], [4, 12], [3, 13], [2, 14]]) t.set(x, y, hex(0xf0f0f0));
+    t.outline(OUT);
+  },
+  string: (t) => { t.clear(); let x = 3, y = 3; for (let i = 0; i < 14; i++) { t.set(x, y, STR); x += i % 3 === 2 ? 0 : 1; y += i % 3 === 1 ? 0 : 1; if (x > 12) x = 12; } for (let i = 0; i < 5; i++) t.set(9 - i, 12 + (i % 2), STR); t.outline(hex(0x6a6a6a)); },
+  feather: (t) => { t.clear(); for (let i = 0; i < 11; i++) { t.set(3 + i, 13 - i, hex(0xb0b0b0)); for (let k = 1; k < Math.min(4, 1 + (i > 2 ? 3 : 1)); k++) { t.set(3 + i - k, 13 - i - k + 1, hex(0xf6f6f6)); t.set(3 + i + k, 13 - i + k - 1, hex(0xe0e0e0)); } } t.outline(hex(0x5a5a5a)); },
+  gunpowder: (t) => { t.clear(); blob(t, 8, 9, 5.5, 4.5, [hex(0x5a5a5a), hex(0x6e6e6e), hex(0x404040), hex(0x858585)]); for (let i = 0; i < 12; i++) t.set(3 + Math.floor(t.r() * 10), 5 + Math.floor(t.r() * 8), t.r() < 0.5 ? hex(0x2a2a2a) : hex(0x9a9a9a)); t.outline(hex(0x1a1a1a)); },
+  bone: (t) => { t.clear(); const c = hex(0xe8e4d0); for (let i = 0; i < 9; i++) { t.set(4 + i, 11 - i, c); t.set(5 + i, 11 - i, shade(c, 0.85)); } for (const [x, y] of [[2, 11], [3, 13], [2, 12], [3, 12], [4, 13], [12, 2], [13, 3], [14, 3], [13, 4], [12, 1]]) t.set(x, y, c); t.outline(hex(0x5a5440)); },
+  bone_meal: (t) => { t.clear(); for (let i = 0; i < 30; i++) { const x = 4 + Math.floor(t.r() * 8), y = 5 + Math.floor(t.r() * 8); t.set(x, y, t.r() < 0.4 ? hex(0xffffff) : hex(0xd8d4c0)); } t.outline(hex(0x6a6650)); },
+  wheat_seeds: (t) => { t.clear(); for (let i = 0; i < 7; i++) { const x = 3 + Math.floor(t.r() * 9), y = 4 + Math.floor(t.r() * 8); t.set(x, y, hex(0x5aa02a)); t.set(x + 1, y + 1, hex(0x3a7a1a)); } t.outline(hex(0x1a3a0a)); },
+  wheat: (t) => { t.clear(); for (const dx of [0, 2, 4]) { for (let i = 0; i < 8; i++) t.set(3 + dx + i, 14 - i, hex(0xb08a2a)); for (let k = 0; k < 4; k++) { t.set(10 + dx - k, 2 + k + dx / 2, hex(0xe0c050)); t.set(11 + dx - k, 3 + k + dx / 2, hex(0xc8a03a)); } } t.outline(hex(0x4a3a0a)); },
+  chicken: (t) => meat(t, hex(0xf0c0a8), hex(0xfadad0)),
+  cooked_chicken: (t) => meat(t, hex(0xc88a4a), hex(0xe8b070)),
+  oak_door: (t) => { t.clear(); const b = C.oakPlank; for (let y = 1; y < 15; y++) for (let x = 4; x < 12; x++) t.set(x, y, shade(b, 0.88 + t.r() * 0.15)); t.rect(5, 2, 2, 3, hex(0x2a1e10)); t.rect(9, 2, 2, 3, hex(0x2a1e10)); for (let x = 4; x < 12; x++) t.set(x, 7, shade(b, 0.6)); t.set(10, 9, hex(0x3a3a3a)); t.outline(OUT); },
+  red_bed: (t) => bedIcon(t, BED_COL.red),
+  white_bed: (t) => bedIcon(t, BED_COL.white),
+});
+function bedIcon(t, bc) {
+  t.clear();
+  for (let x = 1; x < 15; x++) for (let y = 7; y < 11; y++) t.set(x, y, y < 9 ? shade(bc, 0.9 + t.r() * 0.15) : shade(hex(0x7a5530), 0.9));
+  t.rect(1, 5, 4, 3, hex(0xf2f2f2)); t.rect(5, 6, 10, 1, shade(bc, 1.1));
+  t.rect(1, 11, 2, 2, hex(0x5a3a1a)); t.rect(13, 11, 2, 2, hex(0x5a3a1a));
+  t.outline(OUT);
+}
+for (const m of ARMOR_MATS) for (let si = 0; si < 4; si++) ITEM_DRAW[`${m.key}_${ARMOR_SLOTS[si].key}`] = (t) => armorIcon(t, si, hex(m.color));
 function bucket(t, fill) {
   t.clear();
   const m = hex(0xb8b8b8), dk = hex(0x6a6a6a), hi = hex(0xe8e8e8);
@@ -453,18 +591,19 @@ function bucket(t, fill) {
 }
 
 // ---------- 生成 ----------
+export const MISSING = [];
 export function buildTextures() {
   const tiles = [];
   for (const name of TILES) {
     const t = new Tex(name);
     if (name.startsWith('item_')) {
       const key = name.slice(5);
-      const m = key.match(/^(wooden|stone|iron|golden|diamond)_(pickaxe|axe|shovel|sword)$/);
+      const m = key.match(/^(wooden|stone|iron|golden|diamond)_(pickaxe|axe|shovel|sword|hoe)$/);
       if (m) toolIcon(t, m[2], m[1]);
       else if (ITEM_DRAW[key]) ITEM_DRAW[key](t);
-      else t.noise([255, 0, 255]);
+      else { t.noise([255, 0, 255]); MISSING.push(name); }
     } else if (DRAW[name]) DRAW[name](t);
-    else t.noise([255, 0, 255]);
+    else { t.noise([255, 0, 255]); MISSING.push(name); }
     tiles.push(t.d);
   }
   return tiles;
@@ -479,6 +618,27 @@ export function tileCanvases(tiles) {
   });
 }
 
+// 非完整方块（台阶、楼梯、钟…）的等距图标：逐个盒子绘制顶面、+z 面、+x 面
+function isoModel(g, tileCv, boxes, size) {
+  const k = size / 32;
+  const list = boxes.map((bx) => ({ b: bx.b.map((v) => v * 16), t: bx.t })).sort((p, q) => (p.b[0] + p.b[3] + p.b[2] + p.b[5] + p.b[1] + p.b[4]) - (q.b[0] + q.b[3] + q.b[2] + q.b[5] + q.b[1] + q.b[4]));
+  const draw = (img, m, sx, sy, sw, sh, br) => {
+    if (!img || sw <= 0 || sh <= 0) return;
+    const tmp = document.createElement('canvas'); tmp.width = size; tmp.height = size;
+    const tg = tmp.getContext('2d'); tg.imageSmoothingEnabled = false;
+    tg.setTransform(m[0] * k, m[1] * k, m[2] * k, m[3] * k, m[4] * k, m[5] * k);
+    tg.drawImage(img, sx, sy, sw, sh, sx, sy, sw, sh);
+    tg.setTransform(1, 0, 0, 1, 0, 0);
+    tg.globalCompositeOperation = 'source-atop'; tg.fillStyle = `rgba(0,0,0,${1 - br})`; tg.fillRect(0, 0, size, size);
+    g.drawImage(tmp, 0, 0);
+  };
+  for (const { b, t } of list) {
+    const [x0, y0, z0, x1, y1, z1] = b;
+    draw(tileCv[t[4]], [0.875, 0.4375, 0, 1, 16 - 0.875 * z1, 1.5 + 0.4375 * z1], x0, 16 - y1, x1 - x0, y1 - y0, 0.8);
+    draw(tileCv[t[0]], [0.875, -0.4375, 0, 1, 2 + 0.875 * x1, 8.5 + 0.4375 * x1], 16 - z1, 16 - y1, z1 - z0, y1 - y0, 0.62);
+    draw(tileCv[t[2]], [0.875, 0.4375, -0.875, 0.4375, 16, 17.5 - y1], x0, z0, x1 - x0, z1 - z0, 1);
+  }
+}
 // 物品图标（dataURL，等距方块或平面图标）
 export function buildIcons(tileCv) {
   const icons = new Map();
@@ -509,6 +669,8 @@ export function buildIcons(tileCv) {
       layer(top, [0.875, 0.4375, -0.875, 0.4375, 16, 1.5], 1);
       layer(left, [0.875, 0.4375, 0, 1.0, 2, 8.5], 0.8);
       layer(right, [0.875, -0.4375, 0, 1.0, 16, 15.5], 0.62);
+    } else if (d.isBlock && MODELS[id]) {
+      isoModel(g, tileCv, MODELS[BLOCKS[id].stairs ? id + 2 : id], size);
     } else {
       const ti = d.isBlock ? FACE_TILES[id * 6 + 4] : TILES.indexOf('item_' + d.icon);
       g.drawImage(tileCv[ti], 0, 0, S, S, 0, 0, size, size);
